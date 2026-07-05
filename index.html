@@ -1,0 +1,502 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>TaskBoard</title>
+<meta name="theme-color" content="#6366f1">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>html,body{margin:0;padding:0;background:#f1f5f9;-webkit-tap-highlight-color:transparent}*{box-sizing:border-box}</style>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const {useState,useEffect,useRef}=React;
+
+// ══════════════════════════════════════════════════════════════════
+// 클라우드 동기화 계층
+// 원본 아티팩트의 window.storage / callNotion()(api.anthropic.com 직접호출)은
+// claude.ai 아티팩트 샌드박스 전용 API라 독립 실행형(html 배포)에서는 존재하지 않는다.
+// 이 블록만 전면 교체하고, 그 아래 UI·상태관리 로직은 원본을 그대로 이식했다.
+// ══════════════════════════════════════════════════════════════════
+
+// ⚠️ 배포 후 반드시 본인의 Apps Script 웹앱 URL로 교체 (사용법.md 참조)
+const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzWO1kkm8mFepR6dhiQT6UJNQdcmVcQh2MKZuti4w0BQu7K0CSajJJEKz72rvL9IQsHXw/exec";
+// ⚠️ Apps Script 스크립트 속성의 APP_SECRET과 정확히 같은 값으로 교체 (사용법.md 참조)
+const APP_SECRET = "81f522b36303929a2088f8c641ae5c3bc098fb2919fe89e8";
+const SYNC_INTERVAL_MS = 30000; // 30초 폴링 — 노트북↔모바일 양방향 반영
+
+async function cloudGetAll(){
+  const res = await fetch(`${APPS_SCRIPT_URL}?t=${Date.now()}&secret=${encodeURIComponent(APP_SECRET)}`);
+  if(!res.ok) throw new Error("cloud fetch failed: "+res.status);
+  const data = await res.json();
+  if(data.ok===false) throw new Error(data.error||"인증 실패 — APP_SECRET을 확인하세요");
+  return data; // { key: {value, updatedAt}, ... }
+}
+
+async function cloudSet(key, value){
+  // Content-Type을 text/plain으로 보내는 이유: Apps Script 웹앱은 CORS preflight(OPTIONS)를
+  // 처리하지 않으므로 application/json 대신 simple request로 보내야 브라우저가 막지 않는다.
+  const res = await fetch(APPS_SCRIPT_URL, {
+    method: "POST",
+    headers: {"Content-Type": "text/plain;charset=utf-8"},
+    body: JSON.stringify({action:"set", key, value, secret:APP_SECRET}),
+  });
+  if(!res.ok) throw new Error("cloud set failed: "+res.status);
+  const data = await res.json();
+  if(!data.ok) throw new Error(data.error||"저장 실패");
+  return data; // {ok, key, updatedAt}
+}
+
+async function notionSearch(){
+  const res = await fetch(APPS_SCRIPT_URL, {
+    method:"POST",
+    headers:{"Content-Type":"text/plain;charset=utf-8"},
+    body: JSON.stringify({action:"notionSearch", secret:APP_SECRET}),
+  });
+  return await res.json();
+}
+
+async function notionUpsert(pageId, databaseId, properties){
+  const res = await fetch(APPS_SCRIPT_URL, {
+    method:"POST",
+    headers:{"Content-Type":"text/plain;charset=utf-8"},
+    body: JSON.stringify({action:"notionUpsert", pageId, databaseId, properties, secret:APP_SECRET}),
+  });
+  return await res.json();
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 아래부터 원본 아티팩트 로직 이식 (레이아웃·기능·디자인 변경 없음)
+// ══════════════════════════════════════════════════════════════════
+
+const COLORS=["#6366f1","#f59e0b","#10b981","#ef4444","#3b82f6","#ec4899","#8b5cf6","#14b8a6"];
+const STATUS_OPTS=['우선순위 1','우선순위 2','추후업무','LIFE','분류대기'];
+const SC={'우선순위 1':'#ef4444','우선순위 2':'#f59e0b','추후업무':'#6366f1','LIFE':'#10b981','분류대기':'#94a3b8'};
+const CAT_OPTS=['WORK','LIFE'];
+const CC={'WORK':'#3b82f6','LIFE':'#10b981'};
+const ALERT_DAYS=[7,5,2,1,0];
+const uid=()=>Math.random().toString(36).slice(2,9);
+const toDay=()=>new Date().toISOString().slice(0,10);
+const daysLeft=d=>d?Math.ceil((new Date(d)-new Date(toDay()))/86400000):null;
+const DEF_PROJ=[{id:"p1",name:"웹 리뉴얼",color:"#6366f1",details:[{org:"디자인팀",amount:"5,000,000",note:"UI/UX 개선"}]},{id:"p2",name:"마케팅 캠페인",color:"#f59e0b",details:[{org:"마케팅팀",amount:"3,000,000",note:"SNS 위주"}]}];
+const DEF_TASKS=[{id:"t1",pid:"p1",title:"메인 페이지 디자인",status:"우선순위 1",category:"WORK",start:"2026-06-01",due:"2026-06-07",done:false,created:Date.now()-4000},{id:"t2",pid:"p1",title:"API 연동",status:"우선순위 2",category:"WORK",start:"",due:"2026-06-10",done:false,created:Date.now()-3000},{id:"t3",pid:"p1",title:"QA 테스트",status:"추후업무",category:"WORK",start:"",due:"2026-06-15",done:true,created:Date.now()-2000},{id:"t4",pid:"p2",title:"SNS 콘텐츠 기획",status:"우선순위 1",category:"WORK",start:"2026-06-03",due:"2026-06-06",done:false,created:Date.now()-1000},{id:"t5",pid:"p2",title:"광고 소재 제작",status:"분류대기",category:"LIFE",start:"",due:"2026-06-12",done:false,created:Date.now()-100}];
+
+function ProjInfoPanel({project,onUpdate}){
+  const [open,setOpen]=useState(false);
+  const [rows,setRows]=useState(project.details||[]);
+  useEffect(()=>setRows(project.details||[]),[project.id]);
+  const si={padding:"6px 8px",border:"1px solid #e2e8f0",borderRadius:6,fontSize:12,outline:"none",width:"100%",boxSizing:"border-box"};
+  return(<div style={{background:"#fff",borderBottom:"1px solid #e2e8f0"}}>
+    <div onClick={()=>setOpen(o=>!o)} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 22px",cursor:"pointer",userSelect:"none"}}>
+      <span style={{fontSize:12,fontWeight:600,color:"#1e293b",display:"flex",alignItems:"center",gap:6}}><span style={{width:8,height:8,borderRadius:"50%",background:project.color,display:"inline-block"}}/>프로젝트 상세정보</span>
+      <span style={{fontSize:11,color:"#94a3b8"}}>{open?"▲ 닫기":"▼ 펼치기"}</span>
+    </div>
+    {open&&<div style={{padding:"2px 22px 13px"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+        <span style={{fontSize:11,color:"#94a3b8"}}>관련기관 / 금액 / 특이사항</span>
+        <div style={{display:"flex",gap:6}}>
+          <button onClick={()=>setRows(r=>[...r,{org:"",amount:"",note:""}])} style={{padding:"4px 10px",borderRadius:6,background:"#f1f5f9",color:"#475569",border:"none",fontSize:11,cursor:"pointer",fontWeight:600}}>＋ 항목</button>
+          <button onClick={()=>onUpdate(rows)} style={{padding:"4px 10px",borderRadius:6,background:"#6366f1",color:"#fff",border:"none",fontSize:11,cursor:"pointer",fontWeight:600}}>저장</button>
+        </div>
+      </div>
+      {rows.length===0&&<div style={{fontSize:12,color:"#cbd5e1"}}>항목 없음</div>}
+      {rows.map((d,i)=>(<div key={i} style={{display:"flex",gap:6,marginBottom:6,alignItems:"center"}}>
+        <input style={{...si,flex:1}} placeholder="기관명" value={d.org} onChange={e=>setRows(r=>r.map((x,j)=>j===i?{...x,org:e.target.value}:x))}/>
+        <input style={{...si,flex:1}} placeholder="금액" value={d.amount} onChange={e=>setRows(r=>r.map((x,j)=>j===i?{...x,amount:e.target.value}:x))}/>
+        <input style={{...si,flex:2}} placeholder="특이사항" value={d.note} onChange={e=>setRows(r=>r.map((x,j)=>j===i?{...x,note:e.target.value}:x))}/>
+        <span onClick={()=>setRows(r=>r.filter((_,j)=>j!==i))} style={{cursor:"pointer",color:"#cbd5e1",fontSize:13,flexShrink:0}}>✕</span>
+      </div>))}
+    </div>}
+  </div>);
+}
+
+function App(){
+  const [projects,setProjects]=useState(null);
+  const [tasks,setTasks]=useState(null);
+  const [selPid,setSelPid]=useState("ALL");
+  const [filter,setFilter]=useState("전체");
+  const [catFilter,setCatFilter]=useState("전체");
+  const [sort,setSort]=useState("마감일순");
+  const [view,setView]=useState("main");
+  const [loaded,setLoaded]=useState(false);
+  const [showAddProj,setShowAddProj]=useState(false);
+  const [showAddTask,setShowAddTask]=useState(false);
+  const [showExport,setShowExport]=useState(false);
+  const [showNotion,setShowNotion]=useState(false);
+  const [newProj,setNewProj]=useState({name:"",color:COLORS[0],details:[{org:"",amount:"",note:""}]});
+  const [newTask,setNewTask]=useState({title:"",status:"분류대기",category:"WORK",start:"",due:"",pid:""});
+  const [expOpt,setExpOpt]=useState({scope:"all",format:"byProject",projId:""});
+  const [alerts,setAlerts]=useState([]);
+  const [notifPerm,setNotifPerm]=useState("default");
+  const notified=useRef(new Set());
+  const [notionCfg,setNotionCfg]=useState({dbId:"",dbName:""});
+  const [notionSync,setNotionSync]=useState({});
+  const [syncingId,setSyncingId]=useState(null);
+  const [notionDbs,setNotionDbs]=useState([]);
+  const [loadingDbs,setLoadingDbs]=useState(false);
+  const [selDbId,setSelDbId]=useState("");
+  const [notionErr,setNotionErr]=useState("");
+  const [manualDbUrl,setManualDbUrl]=useState("");
+  const [syncErr,setSyncErr]=useState({});
+  const [toast,setToast]=useState(null);
+  const [systemDashboard,setSystemDashboard]=useState(null);
+  const [cloudOk,setCloudOk]=useState(true);
+
+  const lastSyncRef=useRef({});   // key -> 서버에서 마지막으로 확인한 updatedAt
+  const skipSaveRef=useRef(new Set()); // 원격 반영 직후 1회 재저장 방지용
+
+  // ── 최초 로드 (클라우드 일괄 조회) ─────────────────────────────
+  useEffect(()=>{
+    async function load(){
+      try{
+        const all=await cloudGetAll();
+        ['tmv3_proj','tmv3_tasks','tmv3_notified','tmv3_nconfig','tmv3_nsync','system_dashboard'].forEach(k=>{
+          lastSyncRef.current[k]=all[k]&&all[k].updatedAt?all[k].updatedAt:null;
+        });
+        const pr=all.tmv3_proj,tk=all.tmv3_tasks,nt=all.tmv3_notified,nc=all.tmv3_nconfig,ns=all.tmv3_nsync,sd=all.system_dashboard;
+        setProjects(pr&&pr.value?JSON.parse(pr.value):DEF_PROJ);
+        setTasks(tk&&tk.value?JSON.parse(tk.value):DEF_TASKS);
+        if(nt&&nt.value)notified.current=new Set(JSON.parse(nt.value));
+        if(nc&&nc.value){const c=JSON.parse(nc.value);setNotionCfg(c);setSelDbId(c.dbId||"");}
+        if(ns&&ns.value)setNotionSync(JSON.parse(ns.value));
+        if(sd&&sd.value)setSystemDashboard(JSON.parse(sd.value));
+        setCloudOk(true);
+      }catch(e){
+        console.error("클라우드 로드 실패 — APPS_SCRIPT_URL 설정을 확인하세요:",e);
+        setCloudOk(false);
+        setProjects(DEF_PROJ);setTasks(DEF_TASKS);
+      }
+      setLoaded(true);
+      if("Notification" in window)setNotifPerm(Notification.permission);
+    }
+    load();
+  },[]);
+
+  // ── 로컬 변경 → 클라우드 저장 (write-through) ───────────────────
+  useEffect(()=>{
+    if(!loaded||!projects)return;
+    if(skipSaveRef.current.has('tmv3_proj')){skipSaveRef.current.delete('tmv3_proj');return;}
+    cloudSet('tmv3_proj',JSON.stringify(projects)).then(r=>{lastSyncRef.current.tmv3_proj=r.updatedAt;}).catch(()=>{});
+  },[projects,loaded]);
+
+  useEffect(()=>{
+    if(!loaded||!tasks)return;
+    if(skipSaveRef.current.has('tmv3_tasks')){skipSaveRef.current.delete('tmv3_tasks');return;}
+    cloudSet('tmv3_tasks',JSON.stringify(tasks)).then(r=>{lastSyncRef.current.tmv3_tasks=r.updatedAt;}).catch(()=>{});
+  },[tasks,loaded]);
+
+  // ── 30초 폴링 (다른 기기의 변경사항 수신) ────────────────────────
+  useEffect(()=>{
+    if(!loaded)return;
+    const iv=setInterval(async()=>{
+      try{
+        const all=await cloudGetAll();
+        setCloudOk(true);
+        if(all.tmv3_proj&&all.tmv3_proj.updatedAt&&all.tmv3_proj.updatedAt!==lastSyncRef.current.tmv3_proj){
+          lastSyncRef.current.tmv3_proj=all.tmv3_proj.updatedAt;
+          skipSaveRef.current.add('tmv3_proj');
+          setProjects(JSON.parse(all.tmv3_proj.value));
+        }
+        if(all.tmv3_tasks&&all.tmv3_tasks.updatedAt&&all.tmv3_tasks.updatedAt!==lastSyncRef.current.tmv3_tasks){
+          lastSyncRef.current.tmv3_tasks=all.tmv3_tasks.updatedAt;
+          skipSaveRef.current.add('tmv3_tasks');
+          setTasks(JSON.parse(all.tmv3_tasks.value));
+        }
+        if(all.tmv3_nsync&&all.tmv3_nsync.updatedAt&&all.tmv3_nsync.updatedAt!==lastSyncRef.current.tmv3_nsync){
+          lastSyncRef.current.tmv3_nsync=all.tmv3_nsync.updatedAt;
+          setNotionSync(JSON.parse(all.tmv3_nsync.value));
+        }
+        if(all.tmv3_nconfig&&all.tmv3_nconfig.updatedAt&&all.tmv3_nconfig.updatedAt!==lastSyncRef.current.tmv3_nconfig){
+          lastSyncRef.current.tmv3_nconfig=all.tmv3_nconfig.updatedAt;
+          const c=JSON.parse(all.tmv3_nconfig.value);setNotionCfg(c);setSelDbId(c.dbId||"");
+        }
+        if(all.system_dashboard&&all.system_dashboard.updatedAt&&all.system_dashboard.updatedAt!==lastSyncRef.current.system_dashboard){
+          lastSyncRef.current.system_dashboard=all.system_dashboard.updatedAt;
+          setSystemDashboard(JSON.parse(all.system_dashboard.value));
+        }
+      }catch(e){setCloudOk(false);}
+    },SYNC_INTERVAL_MS);
+    return ()=>clearInterval(iv);
+  },[loaded]);
+
+  useEffect(()=>{
+    if(!loaded||!tasks)return;
+    const check=()=>{
+      const td=toDay(),na=[];
+      tasks.forEach(t=>{
+        if(t.done||!t.due)return;
+        const dl=daysLeft(t.due);
+        ALERT_DAYS.forEach(ad=>{
+          if(dl===ad){const k=`${t.id}_${ad}_${td}`;if(!notified.current.has(k)){notified.current.add(k);const msg=ad===0?`오늘 마감 🔴 ${t.title}`:`📅 ${t.title} — ${ad}일 후 마감`;na.push({id:uid(),msg,days:ad});if("Notification" in window&&Notification.permission==="granted"){try{new Notification("📋 TaskBoard",{body:msg});}catch(e){}}}}
+        });
+      });
+      if(na.length){
+        setAlerts(a=>[...a,...na]);
+        cloudSet('tmv3_notified',JSON.stringify([...notified.current])).then(r=>{lastSyncRef.current.tmv3_notified=r.updatedAt;}).catch(()=>{});
+      }
+    };
+    check();const iv=setInterval(check,60000);return()=>clearInterval(iv);
+  },[loaded,tasks]);
+
+  if(!loaded||!projects||!tasks)return <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",color:"#94a3b8",fontSize:14}}>불러오는 중...</div>;
+  const PM=Object.fromEntries(projects.map(p=>[p.id,p]));
+  const showToast=(msg,ok=true)=>{setToast({msg,ok});setTimeout(()=>setToast(null),3000);};
+  const extractDbId=url=>{const m=(url||"").replace(/-/g,"").match(/[a-f0-9]{32}/i);if(!m)return null;const id=m[0];return`${id.slice(0,8)}-${id.slice(8,12)}-${id.slice(12,16)}-${id.slice(16,20)}-${id.slice(20)}`;};
+
+  const loadNotionDbs=async()=>{
+    setNotionErr("");setLoadingDbs(true);
+    try{
+      const res=await notionSearch();
+      if(!res.ok)throw new Error(res.error||"조회 실패");
+      const dbs=(res.result.results||[]).map(db=>({id:db.id,title:(db.title||[]).map(t=>t.plain_text).join("")||"제목 없음"}));
+      setNotionDbs(dbs);
+    }catch(e){setNotionErr("자동 조회 실패: "+e.message+"\n아래 URL 직접 입력을 사용해주세요.");}
+    setLoadingDbs(false);
+  };
+  const saveNotionCfg=()=>{
+    if(manualDbUrl.trim()){
+      const id=extractDbId(manualDbUrl.trim());
+      if(!id){setNotionErr("올바른 Notion DB URL 또는 ID를 입력해주세요.");return;}
+      const urlTitle=manualDbUrl.includes("notion.so")?manualDbUrl.split("/").pop()?.split("?")[0]?.replace(/-[a-f0-9]{32}$/i,"")?.replace(/-/g," ")||"Notion DB":"Notion DB";
+      const cfg={dbId:id,dbName:decodeURIComponent(urlTitle)||"Notion DB"};
+      setNotionCfg(cfg);cloudSet('tmv3_nconfig',JSON.stringify(cfg)).then(r=>{lastSyncRef.current.tmv3_nconfig=r.updatedAt;}).catch(()=>{});
+      setShowNotion(false);showToast("Notion DB 연결 완료 ✅");return;
+    }
+    const db=notionDbs.find(d=>d.id===selDbId);
+    if(!db){setNotionErr("DB를 선택하거나 URL을 직접 입력해주세요.");return;}
+    const cfg={dbId:db.id,dbName:db.title};
+    setNotionCfg(cfg);cloudSet('tmv3_nconfig',JSON.stringify(cfg)).then(r=>{lastSyncRef.current.tmv3_nconfig=r.updatedAt;}).catch(()=>{});
+    setShowNotion(false);showToast("Notion DB 연결 완료 ✅");
+  };
+  const syncTask=async(taskId)=>{
+    if(!notionCfg.dbId){showToast("먼저 Notion DB를 설정해주세요",false);return;}
+    const task=tasks.find(t=>t.id===taskId);if(!task)return;
+    setSyncingId(taskId);setSyncErr(e=>({...e,[taskId]:""}));
+    try{
+      const existingId=notionSync[taskId];
+      const properties={
+        "이름":{title:[{text:{content:task.title}}]},
+        "category":{select:{name:task.category||"WORK"}},
+        "상태":{select:{name:task.status||"분류대기"}},
+        "완료":{checkbox:!!task.done},
+      };
+      if(task.start)properties["시작일"]={date:{start:task.start}};
+      if(task.due)properties["마감일"]={date:{start:task.due}};
+
+      const res=await notionUpsert(existingId||null,notionCfg.dbId,properties);
+      if(res.ok&&res.page_id){
+        const u={...notionSync,[taskId]:res.page_id};
+        setNotionSync(u);
+        cloudSet('tmv3_nsync',JSON.stringify(u)).then(r=>{lastSyncRef.current.tmv3_nsync=r.updatedAt;}).catch(()=>{});
+        showToast(`"${task.title}" Notion 동기화 완료 ✅`);
+      }else{
+        setSyncErr(e=>({...e,[taskId]:res.error||"동기화 실패"}));
+        showToast("동기화 실패: "+(res.error||"page_id 수신 실패"),false);
+      }
+    }catch(e){
+      setSyncErr(er=>({...er,[taskId]:e.message}));
+      showToast("동기화 실패: "+e.message,false);
+    }
+    setSyncingId(null);
+  };
+  const addProject=()=>{if(!newProj.name.trim())return;setProjects(p=>[...p,{id:uid(),name:newProj.name.trim(),color:newProj.color,details:newProj.details.filter(d=>d.org||d.amount||d.note)}]);setNewProj({name:"",color:COLORS[0],details:[{org:"",amount:"",note:""}]});setShowAddProj(false);};
+  const delProject=pid=>{setProjects(p=>p.filter(x=>x.id!==pid));setTasks(t=>t.filter(x=>x.pid!==pid));if(selPid===pid)setSelPid("ALL");};
+  const addTask=()=>{if(!newTask.title.trim())return;const pid=newTask.pid||(selPid!=="ALL"?selPid:projects[0]?.id||"");if(!pid)return;setTasks(t=>[...t,{id:uid(),pid,title:newTask.title.trim(),status:newTask.status,category:newTask.category,start:newTask.start,due:newTask.due,done:false,created:Date.now()}]);setNewTask({title:"",status:"분류대기",category:"WORK",start:"",due:"",pid:""});setShowAddTask(false);};
+  const toggleDone=id=>setTasks(t=>t.map(x=>x.id===id?{...x,done:!x.done}:x));
+  const delTask=id=>setTasks(t=>t.filter(x=>x.id!==id));
+  function stats(pid){const ts=pid==="ALL"?tasks:tasks.filter(t=>t.pid===pid);const total=ts.length,done=ts.filter(t=>t.done).length;return{total,done,urgent:ts.filter(t=>!t.done&&t.due&&daysLeft(t.due)>=0&&daysLeft(t.due)<=7).length,overdue:ts.filter(t=>!t.done&&t.due&&daysLeft(t.due)<0).length,pct:total?Math.round(done/total*100):0};}
+  function getVisible(){let ts=selPid==="ALL"?tasks:tasks.filter(t=>t.pid===selPid);if(catFilter!=="전체")ts=ts.filter(t=>t.category===catFilter);if(filter==="진행중")ts=ts.filter(t=>!t.done);else if(filter==="완료")ts=ts.filter(t=>t.done);else if(filter==="마감임박")ts=ts.filter(t=>!t.done&&t.due&&daysLeft(t.due)>=0&&daysLeft(t.due)<=7);else if(filter==="기한초과")ts=ts.filter(t=>!t.done&&t.due&&daysLeft(t.due)<0);if(sort==="마감일순")return[...ts].sort((a,b)=>(a.due||"9")>(b.due||"9")?1:-1);if(sort==="상태순")return[...ts].sort((a,b)=>STATUS_OPTS.indexOf(a.status)-STATUS_OPTS.indexOf(b.status));return[...ts].sort((a,b)=>b.created-a.created);}
+  const doExport=()=>{const wb=XLSX.utils.book_new();const hdr=["프로젝트","태스크","카테고리","상태","시작일","마감일","기간(일)","완료여부","남은일수"];const row=t=>{const dl=daysLeft(t.due),dur=t.start&&t.due?Math.ceil((new Date(t.due)-new Date(t.start))/86400000):"";return[PM[t.pid]?.name||"",t.title,t.category||"",t.status||"",t.start||"",t.due||"",dur,t.done?"완료":"진행중",t.due?(dl<0?`${Math.abs(dl)}일 초과`:dl===0?"오늘":`${dl}일`):""];};const scope=expOpt.scope==="project"&&expOpt.projId?tasks.filter(t=>t.pid===expOpt.projId):tasks;if(expOpt.format==="byProject"){[...new Set(scope.map(t=>t.pid))].forEach(pid=>{const p=PM[pid],ts=scope.filter(t=>t.pid===pid),data=[hdr,...ts.map(row)];if(p?.details?.length){data.push([]);data.push(["[프로젝트 정보]"]);data.push(["관련기관","금액","특이사항"]);p.details.forEach(d=>data.push([d.org,d.amount,d.note]));}XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(data),(p?.name||pid).slice(0,31));});}else{const ts=expOpt.format==="byDate"?[...scope].sort((a,b)=>(a.due||"9")>(b.due||"9")?1:-1):scope;XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([hdr,...ts.map(row)]),expOpt.format==="byDate"?"날짜순":"전체");}const out=XLSX.write(wb,{bookType:"xlsx",type:"array"});const url=URL.createObjectURL(new Blob([out],{type:"application/octet-stream"}));Object.assign(document.createElement("a"),{href:url,download:`TaskBoard_${toDay().replace(/-/g,"")}.xlsx`}).click();URL.revokeObjectURL(url);setShowExport(false);};
+
+  const cs=stats(selPid),vis=getVisible(),SelP=selPid!=="ALL"?PM[selPid]:null;
+  const dStyle=due=>{const dl=daysLeft(due);if(dl===null)return{color:"#94a3b8"};if(dl<0||dl<=1)return{color:"#ef4444",fontWeight:600};if(dl<=5)return{color:"#f59e0b",fontWeight:600};if(dl<=7)return{color:"#f97316",fontWeight:600};return{color:"#94a3b8"};};
+  const dLabel=due=>{const dl=daysLeft(due);if(dl===null)return"";if(dl<0)return`${Math.abs(dl)}일 초과 ⚠️`;if(dl===0)return"오늘 마감 🔴";if(dl===1)return"내일 🟠";return`${dl}일 남음`;};
+  const inp={padding:"8px 10px",border:"1px solid #e2e8f0",borderRadius:7,fontSize:13,outline:"none",width:"100%",boxSizing:"border-box"};
+  const b=(bg,c)=>({padding:"7px 14px",borderRadius:8,background:bg,color:c||"#fff",border:"none",fontSize:12,fontWeight:600,cursor:"pointer"});
+  const lbl={fontSize:11,color:"#94a3b8",fontWeight:600,marginBottom:3,display:"block"};
+
+  if(view==="system"){
+    const sd=systemDashboard;
+    const sections=[["1. API 인증키",sd?.blocks?.api],["2. 법령 점검",sd?.blocks?.law],["3. 공통 레이어",sd?.blocks?.layer],["4. 프로젝트 보고서 현황",sd?.blocks?.projects]];
+    return(<div style={{minHeight:"100vh",background:"#f1f5f9",display:"flex",flexDirection:"column",alignItems:"center",padding:"24px 16px"}}>
+      <div style={{width:"100%",maxWidth:720}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}><span style={{fontWeight:700,fontSize:15,color:"#1e293b"}}>🖥 EIA 시스템 현황</span><button onClick={()=>setView("main")} style={b("#6366f1")}>← 전체보기</button></div>
+        {!sd&&<div style={{background:"#fff",borderRadius:12,padding:18,color:"#94a3b8",fontSize:13,boxShadow:"0 2px 8px rgba(0,0,0,.07)"}}>
+          시스템 현황 데이터 없음 — <code>python dashboard_generator.py --json --push-cloud</code> 실행 필요
+        </div>}
+        {sd&&<>
+          <div style={{background:"#fff",borderRadius:12,padding:16,marginBottom:12,boxShadow:"0 2px 8px rgba(0,0,0,.07)",fontSize:11,color:"#94a3b8"}}>생성 시각: {sd.generated_at}</div>
+          <div style={{background:"#fff",borderRadius:12,padding:16,marginBottom:12,boxShadow:"0 2px 8px rgba(0,0,0,.07)"}}>
+            <div style={{fontSize:12,fontWeight:700,marginBottom:8,color:"#1e293b"}}>상태 요약</div>
+            <div style={{display:"flex",gap:16,fontSize:12,flexWrap:"wrap"}}>
+              <span>API 인증키: {sd.summary?.api}</span><span>법령: {sd.summary?.law}</span><span>레이어: {sd.summary?.layer}</span>
+            </div>
+          </div>
+          {sections.map(([title,text])=>(
+            <div key={title} style={{background:"#fff",borderRadius:12,padding:16,marginBottom:12,boxShadow:"0 2px 8px rgba(0,0,0,.07)"}}>
+              <div style={{fontSize:12,fontWeight:700,marginBottom:8,color:"#1e293b"}}>{title}</div>
+              <pre style={{fontSize:11.5,lineHeight:1.6,color:"#334155",whiteSpace:"pre-wrap",wordBreak:"break-word",margin:0,fontFamily:"'Consolas','Malgun Gothic',monospace",overflowX:"auto"}}>{text}</pre>
+            </div>
+          ))}
+        </>}
+      </div>
+    </div>);
+  }
+
+  if(view==="widget"){
+    const as=stats("ALL"),todT=tasks.filter(t=>!t.done&&t.due===toDay()),top3=tasks.filter(t=>!t.done&&t.status==="우선순위 1").slice(0,3);
+    return(<div style={{minHeight:"100vh",background:"#f1f5f9",display:"flex",flexDirection:"column",alignItems:"center",padding:"24px 16px"}}>
+      <div style={{width:"100%",maxWidth:440}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}><span style={{fontWeight:700,fontSize:15,color:"#1e293b"}}>📊 대시보드 위젯</span><button onClick={()=>setView("main")} style={b("#6366f1")}>← 전체보기</button></div>
+        {[<div style={{background:"#fff",borderRadius:12,padding:18,marginBottom:12,boxShadow:"0 2px 8px rgba(0,0,0,.07)"}}>
+          <div style={{...lbl,marginBottom:8}}>전체 진행률</div>
+          <div style={{display:"flex",alignItems:"baseline",gap:8,marginBottom:8}}><span style={{fontSize:32,fontWeight:700,color:"#6366f1"}}>{as.pct}%</span><span style={{fontSize:12,color:"#94a3b8"}}>{as.done}/{as.total} 완료</span></div>
+          <div style={{height:6,background:"#e2e8f0",borderRadius:4}}><div style={{height:"100%",width:as.pct+"%",background:"#6366f1",borderRadius:4}}/></div>
+          <div style={{display:"flex",gap:12,marginTop:8}}>{as.urgent>0&&<span style={{fontSize:12,color:"#f59e0b",fontWeight:600}}>⚠️ 임박 {as.urgent}건</span>}{as.overdue>0&&<span style={{fontSize:12,color:"#ef4444",fontWeight:600}}>🚨 초과 {as.overdue}건</span>}</div>
+        </div>,
+        <div style={{background:"#fff",borderRadius:12,padding:18,marginBottom:12,boxShadow:"0 2px 8px rgba(0,0,0,.07)"}}>
+          <div style={{...lbl,marginBottom:10}}>프로젝트 현황</div>
+          {projects.map(p=>{const st=stats(p.id);return(<div key={p.id} style={{marginBottom:10}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}><span style={{fontSize:13,fontWeight:600,display:"flex",alignItems:"center",gap:5}}><span style={{width:7,height:7,borderRadius:"50%",background:p.color,display:"inline-block"}}/>{p.name}</span><span style={{fontSize:11,color:"#94a3b8"}}>{st.done}/{st.total} · {st.pct}%</span></div><div style={{height:4,background:"#e2e8f0",borderRadius:4}}><div style={{height:"100%",width:st.pct+"%",background:p.color,borderRadius:4}}/></div></div>);})}
+        </div>,
+        <div style={{background:"#fff",borderRadius:12,padding:18,marginBottom:12,boxShadow:"0 2px 8px rgba(0,0,0,.07)"}}>
+          <div style={{...lbl,marginBottom:8}}>📅 오늘 마감 ({todT.length}건)</div>
+          {todT.length===0?<div style={{fontSize:13,color:"#cbd5e1"}}>없음</div>:todT.map(t=><div key={t.id} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 0",borderBottom:"1px solid #f1f5f9"}}><span style={{width:6,height:6,borderRadius:"50%",background:PM[t.pid]?.color,display:"inline-block"}}/><span style={{fontSize:13,flex:1}}>{t.title}</span><span style={{fontSize:10,padding:"2px 7px",borderRadius:10,background:(CC[t.category]||"#94a3b8")+"18",color:CC[t.category]||"#94a3b8",fontWeight:600}}>{t.category}</span></div>)}
+        </div>,
+        <div style={{background:"#fff",borderRadius:12,padding:18,boxShadow:"0 2px 8px rgba(0,0,0,.07)"}}>
+          <div style={{...lbl,marginBottom:8}}>🔥 우선순위 1 TOP 3</div>
+          {top3.length===0?<div style={{fontSize:13,color:"#cbd5e1"}}>없음</div>:top3.map((t,i)=><div key={t.id} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 0",borderBottom:i<top3.length-1?"1px solid #f1f5f9":"none"}}><span style={{fontSize:12,fontWeight:700,color:"#ef4444",width:18}}>#{i+1}</span><span style={{fontSize:13,flex:1}}>{t.title}</span><span style={{fontSize:11,color:"#94a3b8"}}>{PM[t.pid]?.name}</span></div>)}
+        </div>]}
+      </div>
+    </div>);
+  }
+
+  return(<div style={{display:"flex",height:"100vh",fontFamily:"'Pretendard','Segoe UI',sans-serif",background:"#f1f5f9",overflow:"hidden"}}>
+    {toast&&<div style={{position:"fixed",top:16,left:"50%",transform:"translateX(-50%)",zIndex:400,background:toast.ok?"#1e293b":"#ef4444",color:"#fff",borderRadius:10,padding:"10px 20px",fontSize:13,fontWeight:600,boxShadow:"0 4px 16px rgba(0,0,0,.2)",whiteSpace:"nowrap"}}>{toast.msg}</div>}
+    {!cloudOk&&<div style={{position:"fixed",bottom:12,left:12,zIndex:300,background:"#fef2f2",border:"1px solid #fecaca",color:"#ef4444",borderRadius:9,padding:"8px 13px",fontSize:11,fontWeight:600}}>⚠️ 클라우드 연결 끊김 — 로컬 화면만 표시 중 (다음 폴링에서 재시도)</div>}
+    <div style={{position:"fixed",top:12,right:12,zIndex:300,display:"flex",flexDirection:"column",gap:6,maxWidth:300}}>
+      {alerts.slice(-4).map(a=>(<div key={a.id} style={{background:"#fff",border:`1.5px solid ${a.days<=1?"#ef4444":a.days<=5?"#f59e0b":"#6366f1"}`,borderRadius:9,padding:"10px 13px",boxShadow:"0 4px 14px rgba(0,0,0,.13)",display:"flex",gap:9,alignItems:"center"}}><span style={{fontSize:12,color:"#1e293b",flex:1}}>{a.msg}</span><span onClick={()=>setAlerts(al=>al.filter(x=>x.id!==a.id))} style={{cursor:"pointer",color:"#94a3b8",fontSize:13}}>✕</span></div>))}
+    </div>
+    <div style={{width:224,background:"#1e293b",display:"flex",flexDirection:"column",flexShrink:0}}>
+      <div style={{padding:"18px 20px 14px",color:"#fff",fontWeight:700,fontSize:15,borderBottom:"1px solid #334155"}}>📋 TaskBoard</div>
+      <div style={{flex:1,overflowY:"auto",padding:"10px 0"}}>
+        <div onClick={()=>setSelPid("ALL")} style={{display:"flex",alignItems:"center",gap:8,padding:"9px 18px",cursor:"pointer",background:selPid==="ALL"?"#334155":"transparent",color:selPid==="ALL"?"#fff":"#94a3b8",fontSize:13,userSelect:"none"}}><span>🗂</span><span style={{flex:1}}>전체 프로젝트</span><span style={{fontSize:10,background:"#475569",padding:"1px 6px",borderRadius:10}}>{tasks.length}</span></div>
+        {projects.map(p=>(<div key={p.id} onClick={()=>setSelPid(p.id)} style={{display:"flex",alignItems:"center",gap:8,padding:"9px 18px",cursor:"pointer",background:selPid===p.id?"#334155":"transparent",color:selPid===p.id?"#fff":"#94a3b8",fontSize:13,userSelect:"none"}}><span style={{width:8,height:8,borderRadius:"50%",background:p.color,flexShrink:0}}/><span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name}</span><span style={{fontSize:10,background:"#475569",padding:"1px 6px",borderRadius:10,flexShrink:0}}>{tasks.filter(t=>t.pid===p.id).length}</span><span onClick={e=>{e.stopPropagation();delProject(p.id);}} style={{fontSize:12,color:"#64748b",cursor:"pointer",marginLeft:2}}>✕</span></div>))}
+      </div>
+      <div style={{padding:"12px 14px",borderTop:"1px solid #334155",display:"flex",flexDirection:"column",gap:6}}>
+        {notifPerm!=="granted"&&<button onClick={async()=>{if("Notification" in window){const p=await Notification.requestPermission();setNotifPerm(p);}}} style={{...b("#f59e0b"),fontSize:11,display:"flex",justifyContent:"center"}}>🔔 알림 권한 허용</button>}
+        <button onClick={()=>setShowNotion(true)} style={{...b(notionCfg.dbId?"#059669":"#475569"),fontSize:11,display:"flex",justifyContent:"center",alignItems:"center",gap:4}}>🔗 {notionCfg.dbId?`Notion: ${notionCfg.dbName.slice(0,9)}…`:"Notion 연동 설정"}</button>
+        <button onClick={()=>setShowAddProj(true)} style={{...b("#334155"),fontSize:11,display:"flex",justifyContent:"center"}}>＋ 프로젝트 추가</button>
+        <button onClick={()=>setShowExport(true)} style={{...b("#10b981"),fontSize:11,display:"flex",justifyContent:"center"}}>📥 엑셀 내보내기</button>
+        <button onClick={()=>setView("widget")} style={{...b("#6366f1"),fontSize:11,display:"flex",justifyContent:"center"}}>📊 위젯 보기</button>
+        <button onClick={()=>setView("system")} style={{...b("#475569"),fontSize:11,display:"flex",justifyContent:"center"}}>🖥 시스템 현황</button>
+      </div>
+    </div>
+    <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"13px 22px",background:"#fff",borderBottom:"1px solid #e2e8f0"}}>
+        <div><div style={{fontWeight:700,fontSize:15,color:"#1e293b"}}>{selPid==="ALL"?"전체 프로젝트":PM[selPid]?.name}</div><div style={{fontSize:11,color:"#94a3b8"}}>태스크 관리</div></div>
+        <button onClick={()=>setShowAddTask(true)} style={b("#6366f1")}>＋ 태스크 추가</button>
+      </div>
+      <div style={{display:"flex",gap:10,padding:"12px 22px",background:"#fff",borderBottom:"1px solid #e2e8f0"}}>
+        {[{l:"전체",n:cs.total,c:"#6366f1"},{l:"완료",n:cs.done,c:"#10b981"},{l:"마감임박(7일)",n:cs.urgent,c:"#f59e0b"},{l:"기한초과",n:cs.overdue,c:"#ef4444"}].map(x=>(<div key={x.l} style={{flex:1,background:"#f8fafc",borderRadius:9,padding:"10px 14px",borderTop:`3px solid ${x.c}`}}><div style={{fontSize:20,fontWeight:700,color:"#1e293b"}}>{x.n}</div><div style={{fontSize:10,color:"#94a3b8",marginTop:1}}>{x.l}</div>{x.l==="완료"&&<div style={{height:3,background:"#e2e8f0",borderRadius:3,marginTop:4}}><div style={{height:"100%",width:cs.pct+"%",background:x.c,borderRadius:3}}/></div>}</div>))}
+      </div>
+      {SelP&&<ProjInfoPanel project={SelP} onUpdate={d=>setProjects(p=>p.map(x=>x.id===SelP.id?{...x,details:d}:x))}/>}
+      <div style={{display:"flex",gap:5,padding:"9px 22px",alignItems:"center",flexWrap:"wrap",background:"#fff",borderBottom:"1px solid #e2e8f0"}}>
+        {["전체","WORK","LIFE"].map(c=>(<button key={c} onClick={()=>setCatFilter(c)} style={{padding:"4px 10px",borderRadius:20,border:`1px solid ${catFilter===c?(c==="WORK"?"#3b82f6":c==="LIFE"?"#10b981":"#6366f1"):"#e2e8f0"}`,background:catFilter===c?(c==="WORK"?"#3b82f6":c==="LIFE"?"#10b981":"#6366f1"):"transparent",color:catFilter===c?"#fff":"#64748b",fontSize:11,cursor:"pointer",fontWeight:catFilter===c?600:400}}>{c==="전체"?"🗂 전체":c}</button>))}
+        <div style={{width:1,height:16,background:"#e2e8f0",margin:"0 2px"}}/>
+        {["전체","진행중","완료","마감임박","기한초과"].map(f=>(<button key={f} onClick={()=>setFilter(f)} style={{padding:"4px 10px",borderRadius:20,border:`1px solid ${filter===f?"#6366f1":"#e2e8f0"}`,background:filter===f?"#6366f1":"transparent",color:filter===f?"#fff":"#64748b",fontSize:11,cursor:"pointer",fontWeight:filter===f?600:400}}>{f}</button>))}
+        <select value={sort} onChange={e=>setSort(e.target.value)} style={{padding:"4px 8px",border:"1px solid #e2e8f0",borderRadius:7,fontSize:11,color:"#475569",outline:"none",marginLeft:"auto",background:"#fff"}}>{["마감일순","상태순","생성일순"].map(o=><option key={o}>{o}</option>)}</select>
+      </div>
+      <div style={{flex:1,overflowY:"auto",padding:"12px 22px"}}>
+        {vis.length===0&&<div style={{textAlign:"center",color:"#cbd5e1",fontSize:14,padding:48}}>태스크가 없습니다</div>}
+        {vis.map(t=>{
+          const dl=daysLeft(t.due),dur=t.start&&t.due?Math.ceil((new Date(t.due)-new Date(t.start))/86400000):null,isSynced=!!notionSync[t.id],isSyncing=syncingId===t.id;
+          return(<div key={t.id} style={{display:"flex",alignItems:"flex-start",gap:10,background:"#fff",borderRadius:10,padding:"11px 13px",marginBottom:7,boxShadow:"0 1px 3px rgba(0,0,0,.05)",opacity:t.done?.8:1,borderLeft:t.done?"none":`3px solid ${dl!==null&&dl<=1?"#ef4444":dl!==null&&dl<=5?"#f59e0b":"transparent"}`}}>
+            <div onClick={()=>toggleDone(t.id)} style={{width:17,height:17,borderRadius:5,border:`2px solid ${t.done?"#6366f1":"#cbd5e1"}`,background:t.done?"#6366f1":"transparent",display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",flexShrink:0,marginTop:2}}>{t.done&&<svg width="9" height="9" viewBox="0 0 9 9"><path d="M1 4.5L3.5 7L8 2" stroke="#fff" strokeWidth="1.7" fill="none" strokeLinecap="round"/></svg>}</div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:13.5,fontWeight:500,color:t.done?"#94a3b8":"#1e293b",textDecoration:t.done?"line-through":"none",lineHeight:1.4}}>{t.title}</div>
+              <div style={{display:"flex",gap:5,marginTop:5,flexWrap:"wrap",alignItems:"center"}}>
+                {selPid==="ALL"&&<span style={{fontSize:11,color:PM[t.pid]?.color,fontWeight:600,display:"flex",alignItems:"center",gap:3}}><span style={{width:6,height:6,borderRadius:"50%",background:PM[t.pid]?.color,display:"inline-block"}}/>{PM[t.pid]?.name}</span>}
+                <span style={{fontSize:10,padding:"2px 7px",borderRadius:10,background:(CC[t.category]||"#94a3b8")+"18",color:CC[t.category]||"#94a3b8",fontWeight:700}}>{t.category||"-"}</span>
+                <span style={{fontSize:10,padding:"2px 7px",borderRadius:10,background:(SC[t.status]||"#94a3b8")+"18",color:SC[t.status]||"#94a3b8",fontWeight:600}}>{t.status||"-"}</span>
+                {t.start&&<span style={{fontSize:11,color:"#94a3b8"}}>▶ {t.start}</span>}
+                {t.due&&<span style={{fontSize:11,...dStyle(t.due)}}>⏰ {t.due} · {dLabel(t.due)}</span>}
+                {dur!==null&&<span style={{fontSize:10,color:"#94a3b8",background:"#f1f5f9",padding:"1px 6px",borderRadius:8}}>{dur}일 기간</span>}
+              </div>
+            </div>
+            <button onClick={()=>syncTask(t.id)} disabled={isSyncing} style={{padding:"5px 9px",borderRadius:7,border:"none",fontSize:10,fontWeight:600,cursor:isSyncing?"wait":"pointer",background:isSyncing?"#f1f5f9":isSynced?"#d1fae5":"#ede9fe",color:isSyncing?"#94a3b8":isSynced?"#059669":"#6366f1",flexShrink:0,whiteSpace:"nowrap",marginTop:1}}>{isSyncing?"⏳ 전송 중":isSynced?"✓ 동기화됨":"📤 Notion"}</button>
+            <span onClick={()=>delTask(t.id)} style={{fontSize:13,color:"#cbd5e1",cursor:"pointer",padding:2,flexShrink:0}}>✕</span>
+          </div>);
+        })}
+      </div>
+    </div>
+    {showNotion&&(<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200}} onClick={()=>setShowNotion(false)}><div style={{background:"#fff",borderRadius:14,padding:24,width:440,maxHeight:"90vh",overflowY:"auto",boxShadow:"0 8px 32px rgba(0,0,0,.2)"}} onClick={e=>e.stopPropagation()}>
+      <div style={{fontWeight:700,fontSize:15,marginBottom:4}}>🔗 Notion 연동 설정</div>
+      <div style={{fontSize:12,color:"#94a3b8",marginBottom:16}}>Notion todolist DB를 연결하세요</div>
+      {notionCfg.dbId&&<div style={{background:"#d1fae5",borderRadius:8,padding:"9px 13px",marginBottom:14,fontSize:12,color:"#059669",fontWeight:600}}>✓ 현재 연결됨: {notionCfg.dbName}<br/><span style={{fontSize:10,fontWeight:400,color:"#047857"}}>ID: {notionCfg.dbId}</span></div>}
+      {notionErr&&<div style={{background:"#fef2f2",borderRadius:8,padding:"9px 13px",marginBottom:12,fontSize:12,color:"#ef4444",whiteSpace:"pre-line"}}>{notionErr}</div>}
+
+      <div style={{background:"#f0fdf4",borderRadius:8,padding:12,marginBottom:14,border:"1px solid #bbf7d0"}}>
+        <div style={{fontSize:12,fontWeight:700,color:"#15803d",marginBottom:6}}>✅ 방법 1 (권장) — Notion DB URL 직접 입력</div>
+        <div style={{fontSize:11,color:"#16a34a",marginBottom:8}}>Notion에서 DB 페이지 열기 → 주소창 URL 복사 → 아래 붙여넣기</div>
+        <input style={{...inp,fontSize:12}} placeholder="https://www.notion.so/your-db-title-xxxxxxxxxxxxxxxx" value={manualDbUrl} onChange={e=>setManualDbUrl(e.target.value)}/>
+        {manualDbUrl&&<div style={{fontSize:11,color:extractDbId(manualDbUrl)?"#059669":"#ef4444",marginTop:4}}>{extractDbId(manualDbUrl)?`✓ DB ID 인식됨: ${extractDbId(manualDbUrl)}`:"⚠️ 유효한 Notion URL/ID를 찾을 수 없음"}</div>}
+      </div>
+
+      <div style={{background:"#f8fafc",borderRadius:8,padding:12,marginBottom:14,border:"1px solid #e2e8f0"}}>
+        <div style={{fontSize:12,fontWeight:700,color:"#475569",marginBottom:6}}>방법 2 — DB 목록 자동 조회</div>
+        <button onClick={loadNotionDbs} disabled={loadingDbs} style={{...b(loadingDbs?"#f1f5f9":"#6366f1",loadingDbs?"#94a3b8":undefined),width:"100%",marginBottom:notionDbs.length>0?10:0,fontSize:12,justifyContent:"center"}}>{loadingDbs?"⏳ 조회 중...":"🔍 Notion DB 목록 불러오기"}</button>
+        {notionDbs.length>0&&<><label style={{...lbl,marginTop:4}}>DB 선택</label><select style={inp} value={selDbId} onChange={e=>setSelDbId(e.target.value)}><option value="">선택하세요</option>{notionDbs.map(db=><option key={db.id} value={db.id}>{db.title}</option>)}</select></>}
+      </div>
+
+      <div style={{background:"#f8fafc",borderRadius:8,padding:"10px 12px",marginBottom:16,fontSize:11,color:"#64748b"}}>
+        <div style={{fontWeight:700,marginBottom:4,color:"#475569"}}>📋 동기화 속성 (Notion DB에 아래 이름의 속성이 미리 있어야 함)</div>
+        {[["이름","Title"],["category","Select (WORK/LIFE)"],["상태","Select (우선순위 1/2 등)"],["시작일","Date"],["마감일","Date"],["완료","Checkbox"]].map(([a,bb])=>(<div key={a} style={{display:"flex",justifyContent:"space-between",padding:"1px 0"}}><span>{a}</span><span style={{color:"#6366f1",fontWeight:600}}>→ {bb}</span></div>))}
+      </div>
+      <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+        <button onClick={()=>{setShowNotion(false);setNotionErr("");}} style={b("#f1f5f9","#64748b")}>취소</button>
+        <button onClick={saveNotionCfg} style={b("#6366f1")}>연결 저장</button>
+      </div>
+    </div></div>)}
+    {showAddProj&&(<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200}} onClick={()=>setShowAddProj(false)}><div style={{background:"#fff",borderRadius:14,padding:22,width:460,maxHeight:"85vh",overflowY:"auto",boxShadow:"0 8px 32px rgba(0,0,0,.2)"}} onClick={e=>e.stopPropagation()}>
+      <div style={{fontWeight:700,fontSize:14,marginBottom:14}}>새 프로젝트</div>
+      <label style={lbl}>프로젝트명</label><input style={{...inp,marginBottom:10}} value={newProj.name} onChange={e=>setNewProj(p=>({...p,name:e.target.value}))} placeholder="프로젝트명" autoFocus onKeyDown={e=>e.key==="Enter"&&addProject()}/>
+      <label style={lbl}>색상</label><div style={{display:"flex",gap:7,marginBottom:14}}>{COLORS.map(c=><div key={c} onClick={()=>setNewProj(p=>({...p,color:c}))} style={{width:22,height:22,borderRadius:"50%",background:c,cursor:"pointer",border:newProj.color===c?"3px solid #1e293b":"3px solid transparent"}}/>)}</div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:7}}><label style={{...lbl,marginBottom:0}}>관련기관 / 금액 / 특이사항</label><button onClick={()=>setNewProj(p=>({...p,details:[...p.details,{org:"",amount:"",note:""}]}))} style={{...b("#f1f5f9","#64748b"),padding:"3px 9px",fontSize:11}}>＋ 항목</button></div>
+      {newProj.details.map((d,i)=>(<div key={i} style={{display:"flex",gap:6,marginBottom:6,alignItems:"center"}}><input style={{...inp,flex:1}} placeholder="기관명" value={d.org} onChange={e=>{const nd=[...newProj.details];nd[i]={...nd[i],org:e.target.value};setNewProj(p=>({...p,details:nd}));}}/><input style={{...inp,flex:1}} placeholder="금액" value={d.amount} onChange={e=>{const nd=[...newProj.details];nd[i]={...nd[i],amount:e.target.value};setNewProj(p=>({...p,details:nd}));}}/><input style={{...inp,flex:2}} placeholder="특이사항" value={d.note} onChange={e=>{const nd=[...newProj.details];nd[i]={...nd[i],note:e.target.value};setNewProj(p=>({...p,details:nd}));}}/>{newProj.details.length>1&&<span onClick={()=>setNewProj(p=>({...p,details:p.details.filter((_,j)=>j!==i)}))} style={{cursor:"pointer",color:"#94a3b8",fontSize:13}}>✕</span>}</div>))}
+      <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}}><button onClick={()=>setShowAddProj(false)} style={b("#f1f5f9","#64748b")}>취소</button><button onClick={addProject} style={b("#6366f1")}>추가</button></div>
+    </div></div>)}
+    {showAddTask&&(<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200}} onClick={()=>setShowAddTask(false)}><div style={{background:"#fff",borderRadius:14,padding:22,width:390,boxShadow:"0 8px 32px rgba(0,0,0,.2)"}} onClick={e=>e.stopPropagation()}>
+      <div style={{fontWeight:700,fontSize:14,marginBottom:14}}>새 태스크</div>
+      <label style={lbl}>태스크명</label><input style={{...inp,marginBottom:10}} value={newTask.title} onChange={e=>setNewTask(p=>({...p,title:e.target.value}))} placeholder="태스크명" autoFocus/>
+      <label style={lbl}>프로젝트</label><select style={{...inp,marginBottom:10}} value={newTask.pid||(selPid!=="ALL"?selPid:projects[0]?.id||"")} onChange={e=>setNewTask(p=>({...p,pid:e.target.value}))}>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select>
+      <div style={{display:"flex",gap:8,marginBottom:10}}><div style={{flex:1}}><label style={lbl}>카테고리</label><select style={inp} value={newTask.category} onChange={e=>setNewTask(p=>({...p,category:e.target.value}))}>{CAT_OPTS.map(c=><option key={c}>{c}</option>)}</select></div><div style={{flex:1.6}}><label style={lbl}>상태</label><select style={inp} value={newTask.status} onChange={e=>setNewTask(p=>({...p,status:e.target.value}))}>{STATUS_OPTS.map(s=><option key={s}>{s}</option>)}</select></div></div>
+      <div style={{display:"flex",gap:8,marginBottom:8}}><div style={{flex:1}}><label style={lbl}>시작일 <span style={{fontWeight:400}}>(선택)</span></label><input type="date" style={inp} value={newTask.start} onChange={e=>setNewTask(p=>({...p,start:e.target.value}))}/></div><div style={{flex:1}}><label style={lbl}>마감일</label><input type="date" style={inp} value={newTask.due} onChange={e=>setNewTask(p=>({...p,due:e.target.value}))}/></div></div>
+      {newTask.start&&newTask.due&&new Date(newTask.due)>=new Date(newTask.start)&&<div style={{fontSize:11,color:"#6366f1",marginBottom:6,fontWeight:600}}>📅 기간: {Math.ceil((new Date(newTask.due)-new Date(newTask.start))/86400000)+1}일</div>}
+      <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:10}}><button onClick={()=>setShowAddTask(false)} style={b("#f1f5f9","#64748b")}>취소</button><button onClick={addTask} style={b("#6366f1")}>추가</button></div>
+    </div></div>)}
+    {showExport&&(<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200}} onClick={()=>setShowExport(false)}><div style={{background:"#fff",borderRadius:14,padding:22,width:360,boxShadow:"0 8px 32px rgba(0,0,0,.2)"}} onClick={e=>e.stopPropagation()}>
+      <div style={{fontWeight:700,fontSize:14,marginBottom:14}}>📥 엑셀 내보내기</div>
+      <label style={lbl}>범위</label><select style={{...inp,marginBottom:10}} value={expOpt.scope} onChange={e=>setExpOpt(o=>({...o,scope:e.target.value,projId:""}))}><option value="all">전체 프로젝트</option><option value="project">특정 프로젝트</option></select>
+      {expOpt.scope==="project"&&<><label style={lbl}>프로젝트 선택</label><select style={{...inp,marginBottom:10}} value={expOpt.projId} onChange={e=>setExpOpt(o=>({...o,projId:e.target.value}))}><option value="">선택하세요</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></>}
+      <label style={lbl}>형식</label>
+      <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:16}}>{[{v:"byProject",l:"📁 프로젝트별 (시트 분리)"},{v:"byDate",l:"📅 날짜순"},{v:"all",l:"📋 전체 목록"}].map(o=>(<label key={o.v} style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12.5,color:"#1e293b"}}><input type="radio" name="fmt" value={o.v} checked={expOpt.format===o.v} onChange={()=>setExpOpt(x=>({...x,format:o.v}))} style={{accentColor:"#6366f1"}}/>{o.l}</label>))}</div>
+      <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}><button onClick={()=>setShowExport(false)} style={b("#f1f5f9","#64748b")}>취소</button><button onClick={doExport} style={b("#10b981")}>📥 내보내기</button></div>
+    </div></div>)}
+  </div>);
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+<script>
+if('serviceWorker' in navigator){
+  window.addEventListener('load',()=>{navigator.serviceWorker.register('sw.js').catch(()=>{});});
+}
+</script>
+</body>
+</html>
