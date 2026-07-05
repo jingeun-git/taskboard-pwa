@@ -431,6 +431,7 @@ function App(){
   const [showAddProj,setShowAddProj]=useState(false);
   const [editingProjId,setEditingProjId]=useState(null); // null=새 프로젝트 추가 모드, id 있으면 수정 모드
   const [showAddTask,setShowAddTask]=useState(false);
+  const [editingTaskId,setEditingTaskId]=useState(null); // null=새 태스크 추가 모드, id 있으면 수정 모드
   const [showExport,setShowExport]=useState(false);
   const [showNotion,setShowNotion]=useState(false);
   const [newProj,setNewProj]=useState({name:"",color:COLORS[0],deadline:"",details:[{org:"",amount:"",note:""}]});
@@ -684,7 +685,21 @@ function App(){
     setEditingProjId(null);setNewProj(BLANK_PROJ);setShowAddProj(false);
   };
   const delProject=pid=>{setProjects(p=>p.filter(x=>x.id!==pid));setTasks(t=>t.filter(x=>x.pid!==pid));if(selPid===pid)setSelPid("ALL");};
-  const addTask=()=>{if(!newTask.title.trim())return;const pid=newTask.pid||(selPid!=="ALL"?selPid:projects[0]?.id||"");if(!pid)return;setTasks(t=>[...t,{id:uid(),pid,title:newTask.title.trim(),status:newTask.status,category:newTask.category,start:newTask.start,due:newTask.due,done:false,created:Date.now()}]);setNewTask({title:"",status:"분류대기",category:"WORK",start:"",due:"",pid:""});setShowAddTask(false);};
+  const BLANK_TASK={title:"",status:"분류대기",category:"WORK",start:"",due:"",pid:""};
+  const openAddTask=()=>{setEditingTaskId(null);setNewTask({...BLANK_TASK,pid:selPid!=="ALL"?selPid:""});setShowAddTask(true);};
+  const openEditTask=t=>{setEditingTaskId(t.id);setNewTask({title:t.title,status:t.status,category:t.category,start:t.start||"",due:t.due||"",pid:t.pid});setShowAddTask(true);};
+  const saveTask=()=>{
+    if(!newTask.title.trim())return;
+    const pid=newTask.pid||(selPid!=="ALL"?selPid:projects[0]?.id||"");
+    if(!pid)return;
+    if(editingTaskId){
+      setTasks(t=>t.map(x=>x.id===editingTaskId?{...x,pid,title:newTask.title.trim(),status:newTask.status,category:newTask.category,start:newTask.start,due:newTask.due}:x));
+      showToast(`"${newTask.title.trim()}" 태스크 수정 완료`);
+    }else{
+      setTasks(t=>[...t,{id:uid(),pid,title:newTask.title.trim(),status:newTask.status,category:newTask.category,start:newTask.start,due:newTask.due,done:false,created:Date.now()}]);
+    }
+    setEditingTaskId(null);setNewTask(BLANK_TASK);setShowAddTask(false);
+  };
   const quickAdd=({title,pid,category,due})=>{setTasks(t=>[...t,{id:uid(),pid,title,status:category==="LIFE"?"LIFE":"분류대기",category,start:"",due,done:false,created:Date.now()}]);showToast(`"${title}" 추가 완료 (${due} 마감)`);};
   const toggleDone=id=>setTasks(t=>t.map(x=>x.id===id?{...x,done:!x.done}:x));
   const delTask=id=>setTasks(t=>t.filter(x=>x.id!==id));
@@ -761,7 +776,7 @@ function App(){
       <div style={{display:"flex",gap:4,background:"#f1f5f9",borderRadius:11,padding:3}}>
         {TABS.map(t=>(<button key={t.id} onClick={()=>setView(t.id)} style={{padding:"7px 14px",borderRadius:9,border:"none",background:view===t.id?"#6366f1":"transparent",color:view===t.id?"#fff":"#64748b",fontSize:12.5,fontWeight:700,cursor:"pointer",transition:"background .2s"}}>{t.l}</button>))}
       </div>
-      <button onClick={()=>setShowAddTask(true)} style={{...b("#6366f1"),marginLeft:"auto"}}>＋ 태스크</button>
+      <button onClick={openAddTask} style={{...b("#6366f1"),marginLeft:"auto"}}>＋ 태스크</button>
       <AnalogClock/>
     </div>
 
@@ -828,7 +843,8 @@ function App(){
                 </div>
               </div>
               <button onClick={()=>syncTask(t.id)} disabled={isSyncing} style={{padding:"5px 9px",borderRadius:7,border:"none",fontSize:10,fontWeight:600,cursor:isSyncing?"wait":"pointer",background:isSyncing?"#f1f5f9":isSynced?"#d1fae5":"#ede9fe",color:isSyncing?"#94a3b8":isSynced?"#059669":"#6366f1",flexShrink:0,whiteSpace:"nowrap",marginTop:1}}>{isSyncing?"⏳ 전송 중":isSynced?"✓ 동기화됨":"📤 Notion"}</button>
-              <span onClick={()=>delTask(t.id)} style={{fontSize:13,color:"#cbd5e1",cursor:"pointer",padding:2,flexShrink:0}}>✕</span>
+              <span onClick={()=>openEditTask(t)} title="태스크 수정" style={{fontSize:12,color:"#94a3b8",cursor:"pointer",padding:2,flexShrink:0}}>✏</span>
+              <span onClick={()=>{if(confirm(`"${t.title}" 태스크를 삭제하시겠습니까?`))delTask(t.id);}} style={{fontSize:13,color:"#cbd5e1",cursor:"pointer",padding:2,flexShrink:0}}>✕</span>
             </div>);
           })}
         </div>
@@ -898,14 +914,14 @@ function App(){
       <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}}><button onClick={()=>{setShowAddProj(false);setEditingProjId(null);}} style={b("#f1f5f9","#64748b")}>취소</button><button onClick={saveProject} style={b("#6366f1")}>{editingProjId?"저장":"추가"}</button></div>
     </div></div>)}
 
-    {showAddTask&&(<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200}} onClick={()=>setShowAddTask(false)}><div style={{background:"#fff",borderRadius:14,padding:22,width:390,boxShadow:"0 8px 32px rgba(0,0,0,.2)"}} onClick={e=>e.stopPropagation()}>
-      <div style={{fontWeight:700,fontSize:14,marginBottom:14}}>새 태스크</div>
-      <label style={lbl}>태스크명</label><input style={{...inp,marginBottom:10}} value={newTask.title} onChange={e=>setNewTask(p=>({...p,title:e.target.value}))} placeholder="태스크명" autoFocus/>
+    {showAddTask&&(<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200}} onClick={()=>{setShowAddTask(false);setEditingTaskId(null);}}><div style={{background:"#fff",borderRadius:14,padding:22,width:390,boxShadow:"0 8px 32px rgba(0,0,0,.2)"}} onClick={e=>e.stopPropagation()}>
+      <div style={{fontWeight:700,fontSize:14,marginBottom:14}}>{editingTaskId?"✏ 태스크 수정":"새 태스크"}</div>
+      <label style={lbl}>태스크명</label><input style={{...inp,marginBottom:10}} value={newTask.title} onChange={e=>setNewTask(p=>({...p,title:e.target.value}))} placeholder="태스크명" autoFocus onKeyDown={e=>e.key==="Enter"&&saveTask()}/>
       <label style={lbl}>프로젝트</label><select style={{...inp,marginBottom:10}} value={newTask.pid||(selPid!=="ALL"?selPid:projects[0]?.id||"")} onChange={e=>setNewTask(p=>({...p,pid:e.target.value}))}>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select>
       <div style={{display:"flex",gap:8,marginBottom:10}}><div style={{flex:1}}><label style={lbl}>카테고리</label><select style={inp} value={newTask.category} onChange={e=>setNewTask(p=>({...p,category:e.target.value}))}>{CAT_OPTS.map(c=><option key={c}>{c}</option>)}</select></div><div style={{flex:1.6}}><label style={lbl}>상태</label><select style={inp} value={newTask.status} onChange={e=>setNewTask(p=>({...p,status:e.target.value}))}>{STATUS_OPTS.map(s=><option key={s}>{s}</option>)}</select></div></div>
       <div style={{display:"flex",gap:8,marginBottom:8}}><div style={{flex:1}}><label style={lbl}>시작일 <span style={{fontWeight:400}}>(선택)</span></label><input type="date" style={inp} value={newTask.start} onChange={e=>setNewTask(p=>({...p,start:e.target.value}))}/></div><div style={{flex:1}}><label style={lbl}>마감일</label><input type="date" style={inp} value={newTask.due} onChange={e=>setNewTask(p=>({...p,due:e.target.value}))}/></div></div>
       {newTask.start&&newTask.due&&new Date(newTask.due)>=new Date(newTask.start)&&<div style={{fontSize:11,color:"#6366f1",marginBottom:6,fontWeight:600}}>📅 기간: {Math.ceil((new Date(newTask.due)-new Date(newTask.start))/86400000)+1}일</div>}
-      <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:10}}><button onClick={()=>setShowAddTask(false)} style={b("#f1f5f9","#64748b")}>취소</button><button onClick={addTask} style={b("#6366f1")}>추가</button></div>
+      <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:10}}><button onClick={()=>{setShowAddTask(false);setEditingTaskId(null);}} style={b("#f1f5f9","#64748b")}>취소</button><button onClick={saveTask} style={b("#6366f1")}>{editingTaskId?"저장":"추가"}</button></div>
     </div></div>)}
 
     {showExport&&(<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200}} onClick={()=>setShowExport(false)}><div style={{background:"#fff",borderRadius:14,padding:22,width:360,boxShadow:"0 8px 32px rgba(0,0,0,.2)"}} onClick={e=>e.stopPropagation()}>
