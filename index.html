@@ -211,7 +211,9 @@ function SectionPanel({cat,tasks,projects,PM,onToggle,widgets}){
         <div style={{fontSize:11,fontWeight:700,color:"#94a3b8",marginBottom:8}}>프로젝트 진행률</div>
         {projRows.map(r=>(<div key={r.p.id} style={{marginBottom:9}}>
           <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
-            <span style={{fontSize:12.5,fontWeight:600,color:"#1e293b",display:"flex",alignItems:"center",gap:5}}><span style={{width:7,height:7,borderRadius:"50%",background:r.p.color,display:"inline-block"}}/>{r.p.name}</span>
+            <span style={{fontSize:12.5,fontWeight:600,color:"#1e293b",display:"flex",alignItems:"center",gap:5}}><span style={{width:7,height:7,borderRadius:"50%",background:r.p.color,display:"inline-block"}}/>{r.p.name}
+              {r.p.deadline&&(()=>{const dl=daysLeft(r.p.deadline);return<span style={{fontSize:10,fontWeight:700,color:dl<0?"#ef4444":dl<=7?"#f59e0b":"#94a3b8"}}>{dl<0?`기한 ${Math.abs(dl)}일 초과`:dl===0?"기한 오늘":`D-${dl}`}</span>;})()}
+            </span>
             <span style={{fontSize:11,color:"#94a3b8",fontVariantNumeric:"tabular-nums"}}>{r.done}/{r.total} · {r.pct}%</span>
           </div>
           <GaugeBar pct={r.pct} color={r.p.color}/>
@@ -427,10 +429,11 @@ function App(){
   const [sbOpen,setSbOpen]=useState(()=>window.innerWidth>760);
   const [loaded,setLoaded]=useState(false);
   const [showAddProj,setShowAddProj]=useState(false);
+  const [editingProjId,setEditingProjId]=useState(null); // null=새 프로젝트 추가 모드, id 있으면 수정 모드
   const [showAddTask,setShowAddTask]=useState(false);
   const [showExport,setShowExport]=useState(false);
   const [showNotion,setShowNotion]=useState(false);
-  const [newProj,setNewProj]=useState({name:"",color:COLORS[0],details:[{org:"",amount:"",note:""}]});
+  const [newProj,setNewProj]=useState({name:"",color:COLORS[0],deadline:"",details:[{org:"",amount:"",note:""}]});
   const [newTask,setNewTask]=useState({title:"",status:"분류대기",category:"WORK",start:"",due:"",pid:""});
   const [expOpt,setExpOpt]=useState({scope:"all",format:"byProject",projId:""});
   const [alerts,setAlerts]=useState([]);
@@ -665,7 +668,21 @@ function App(){
     }catch(e){showToast("구글 캘린더 동기화 실패: "+e.message,false);}
     setGcalBusy(false);
   };
-  const addProject=()=>{if(!newProj.name.trim())return;setProjects(p=>[...p,{id:uid(),name:newProj.name.trim(),color:newProj.color,details:newProj.details.filter(d=>d.org||d.amount||d.note)}]);setNewProj({name:"",color:COLORS[0],details:[{org:"",amount:"",note:""}]});setShowAddProj(false);};
+  const BLANK_PROJ={name:"",color:COLORS[0],deadline:"",details:[{org:"",amount:"",note:""}]};
+  const openAddProj=()=>{setEditingProjId(null);setNewProj(BLANK_PROJ);setShowAddProj(true);};
+  const openEditProj=p=>{setEditingProjId(p.id);setNewProj({name:p.name,color:p.color,deadline:p.deadline||"",details:p.details&&p.details.length?p.details:[{org:"",amount:"",note:""}]});setShowAddProj(true);};
+  const saveProject=()=>{
+    if(!newProj.name.trim())return;
+    const details=newProj.details.filter(d=>d.org||d.amount||d.note);
+    const deadline=newProj.deadline||"";
+    if(editingProjId){
+      setProjects(p=>p.map(x=>x.id===editingProjId?{...x,name:newProj.name.trim(),color:newProj.color,deadline,details}:x));
+      showToast(`"${newProj.name.trim()}" 프로젝트 수정 완료`);
+    }else{
+      setProjects(p=>[...p,{id:uid(),name:newProj.name.trim(),color:newProj.color,deadline,details}]);
+    }
+    setEditingProjId(null);setNewProj(BLANK_PROJ);setShowAddProj(false);
+  };
   const delProject=pid=>{setProjects(p=>p.filter(x=>x.id!==pid));setTasks(t=>t.filter(x=>x.pid!==pid));if(selPid===pid)setSelPid("ALL");};
   const addTask=()=>{if(!newTask.title.trim())return;const pid=newTask.pid||(selPid!=="ALL"?selPid:projects[0]?.id||"");if(!pid)return;setTasks(t=>[...t,{id:uid(),pid,title:newTask.title.trim(),status:newTask.status,category:newTask.category,start:newTask.start,due:newTask.due,done:false,created:Date.now()}]);setNewTask({title:"",status:"분류대기",category:"WORK",start:"",due:"",pid:""});setShowAddTask(false);};
   const quickAdd=({title,pid,category,due})=>{setTasks(t=>[...t,{id:uid(),pid,title,status:category==="LIFE"?"LIFE":"분류대기",category,start:"",due,done:false,created:Date.now()}]);showToast(`"${title}" 추가 완료 (${due} 마감)`);};
@@ -754,12 +771,12 @@ function App(){
         <div style={{width:224,display:"flex",flexDirection:"column",height:"100%"}}>
           <div style={{flex:1,overflowY:"auto",padding:"10px 0"}}>
             <div onClick={()=>{setSelPid("ALL");setView("proj");}} style={{display:"flex",alignItems:"center",gap:8,padding:"9px 18px",cursor:"pointer",background:selPid==="ALL"&&view==="proj"?"#334155":"transparent",color:selPid==="ALL"?"#fff":"#94a3b8",fontSize:13,userSelect:"none"}}><span>🗂</span><span style={{flex:1}}>전체 프로젝트</span><span style={{fontSize:10,background:"#475569",padding:"1px 6px",borderRadius:10}}>{tasks.length}</span></div>
-            {projects.map(p=>(<div key={p.id} onClick={()=>{setSelPid(p.id);setView("proj");}} style={{display:"flex",alignItems:"center",gap:8,padding:"9px 18px",cursor:"pointer",background:selPid===p.id&&view==="proj"?"#334155":"transparent",color:selPid===p.id?"#fff":"#94a3b8",fontSize:13,userSelect:"none"}}><span style={{width:8,height:8,borderRadius:"50%",background:p.color,flexShrink:0}}/><span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name}</span><span style={{fontSize:10,background:"#475569",padding:"1px 6px",borderRadius:10,flexShrink:0}}>{tasks.filter(t=>t.pid===p.id).length}</span><span onClick={e=>{e.stopPropagation();delProject(p.id);}} style={{fontSize:12,color:"#64748b",cursor:"pointer",marginLeft:2}}>✕</span></div>))}
+            {projects.map(p=>(<div key={p.id} onClick={()=>{setSelPid(p.id);setView("proj");}} style={{display:"flex",alignItems:"center",gap:8,padding:"9px 18px",cursor:"pointer",background:selPid===p.id&&view==="proj"?"#334155":"transparent",color:selPid===p.id?"#fff":"#94a3b8",fontSize:13,userSelect:"none"}}><span style={{width:8,height:8,borderRadius:"50%",background:p.color,flexShrink:0}}/><span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name}</span><span style={{fontSize:10,background:"#475569",padding:"1px 6px",borderRadius:10,flexShrink:0}}>{tasks.filter(t=>t.pid===p.id).length}</span><span onClick={e=>{e.stopPropagation();openEditProj(p);}} title="프로젝트 수정" style={{fontSize:11,color:"#64748b",cursor:"pointer",marginLeft:2}}>✏</span><span onClick={e=>{e.stopPropagation();if(confirm(`"${p.name}" 프로젝트를 삭제하시겠습니까? 소속 태스크 ${tasks.filter(t=>t.pid===p.id).length}건도 함께 삭제됩니다.`))delProject(p.id);}} title="프로젝트 삭제" style={{fontSize:12,color:"#64748b",cursor:"pointer",marginLeft:2}}>✕</span></div>))}
           </div>
           <div style={{padding:"12px 14px",borderTop:"1px solid #334155",display:"flex",flexDirection:"column",gap:6}}>
             {notifPerm!=="granted"&&<button onClick={async()=>{if("Notification" in window){const p=await Notification.requestPermission();setNotifPerm(p);}}} style={{...b("#f59e0b"),fontSize:11,display:"flex",justifyContent:"center"}}>🔔 알림 권한 허용</button>}
             <button onClick={()=>setShowNotion(true)} style={{...b("#059669"),fontSize:11,display:"flex",justifyContent:"center",alignItems:"center",gap:4}}>🔗 Notion: {(notionCfg.dbName||"todolist 2").slice(0,11)}</button>
-            <button onClick={()=>setShowAddProj(true)} style={{...b("#334155"),fontSize:11,display:"flex",justifyContent:"center"}}>＋ 프로젝트 추가</button>
+            <button onClick={openAddProj} style={{...b("#334155"),fontSize:11,display:"flex",justifyContent:"center"}}>＋ 프로젝트 추가</button>
             <button onClick={()=>setShowExport(true)} style={{...b("#10b981"),fontSize:11,display:"flex",justifyContent:"center"}}>📥 엑셀 내보내기</button>
           </div>
         </div>
@@ -770,7 +787,18 @@ function App(){
       {view==="cal"&&<CalendarView tasks={tasks} projects={projects} PM={PM} onToggle={toggleDone} onDelete={delTask} onQuickAdd={quickAdd} onGcal={gcalSync} gcalBusy={gcalBusy}/>}
       {view==="proj"&&<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"13px 22px",background:"#fff",borderBottom:"1px solid #e2e8f0"}}>
-          <div><div style={{fontWeight:700,fontSize:15,color:"#1e293b"}}>{selPid==="ALL"?"전체 프로젝트":PM[selPid]?.name}</div><div style={{fontSize:11,color:"#94a3b8"}}>태스크 관리</div></div>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <div>
+              <div style={{fontWeight:700,fontSize:15,color:"#1e293b",display:"flex",alignItems:"center",gap:7}}>
+                {selPid==="ALL"?"전체 프로젝트":PM[selPid]?.name}
+                {SelP&&<span onClick={()=>openEditProj(SelP)} title="프로젝트 수정(이름·색상·기한·상세정보)" style={{cursor:"pointer",fontSize:12,color:"#94a3b8"}}>✏</span>}
+              </div>
+              <div style={{fontSize:11,color:"#94a3b8",display:"flex",alignItems:"center",gap:8}}>
+                <span>태스크 관리</span>
+                {SelP&&SelP.deadline&&<span style={dStyle(SelP.deadline)}>· 기한 {SelP.deadline} ({dLabel(SelP.deadline)})</span>}
+              </div>
+            </div>
+          </div>
         </div>
         <div style={{display:"flex",gap:10,padding:"12px 22px",background:"#fff",borderBottom:"1px solid #e2e8f0"}}>
           {[{l:"전체",n:cs.total,c:"#6366f1"},{l:"완료",n:cs.done,c:"#10b981"},{l:"마감임박(7일)",n:cs.urgent,c:"#f59e0b"},{l:"기한초과",n:cs.overdue,c:"#ef4444"}].map(x=>(<div key={x.l} style={{flex:1,background:"#f8fafc",borderRadius:9,padding:"10px 14px",borderTop:`3px solid ${x.c}`}}><div style={{fontSize:20,fontWeight:700,color:"#1e293b"}}>{x.n}</div><div style={{fontSize:10,color:"#94a3b8",marginTop:1}}>{x.l}</div>{x.l==="완료"&&<div style={{marginTop:4}}><GaugeBar pct={cs.pct} color={x.c} h={3}/></div>}</div>))}
@@ -860,12 +888,14 @@ function App(){
     </div></div>)}
 
     {showAddProj&&(<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200}} onClick={()=>setShowAddProj(false)}><div style={{background:"#fff",borderRadius:14,padding:22,width:460,maxHeight:"85vh",overflowY:"auto",boxShadow:"0 8px 32px rgba(0,0,0,.2)"}} onClick={e=>e.stopPropagation()}>
-      <div style={{fontWeight:700,fontSize:14,marginBottom:14}}>새 프로젝트</div>
-      <label style={lbl}>프로젝트명</label><input style={{...inp,marginBottom:10}} value={newProj.name} onChange={e=>setNewProj(p=>({...p,name:e.target.value}))} placeholder="프로젝트명" autoFocus onKeyDown={e=>e.key==="Enter"&&addProject()}/>
+      <div style={{fontWeight:700,fontSize:14,marginBottom:14}}>{editingProjId?"✏ 프로젝트 수정":"새 프로젝트"}</div>
+      <label style={lbl}>프로젝트명</label><input style={{...inp,marginBottom:10}} value={newProj.name} onChange={e=>setNewProj(p=>({...p,name:e.target.value}))} placeholder="프로젝트명" autoFocus onKeyDown={e=>e.key==="Enter"&&saveProject()}/>
       <label style={lbl}>색상</label><div style={{display:"flex",gap:7,marginBottom:14}}>{COLORS.map(c=><div key={c} onClick={()=>setNewProj(p=>({...p,color:c}))} style={{width:22,height:22,borderRadius:"50%",background:c,cursor:"pointer",border:newProj.color===c?"3px solid #1e293b":"3px solid transparent"}}/>)}</div>
+      <label style={lbl}>프로젝트 기한 <span style={{fontWeight:400}}>(선택 — 변경되면 다시 열어서 수정)</span></label>
+      <input type="date" style={{...inp,marginBottom:14,maxWidth:180}} value={newProj.deadline} onChange={e=>setNewProj(p=>({...p,deadline:e.target.value}))}/>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:7}}><label style={{...lbl,marginBottom:0}}>관련기관 / 금액 / 특이사항</label><button onClick={()=>setNewProj(p=>({...p,details:[...p.details,{org:"",amount:"",note:""}]}))} style={{...b("#f1f5f9","#64748b"),padding:"3px 9px",fontSize:11}}>＋ 항목</button></div>
       {newProj.details.map((d,i)=>(<div key={i} style={{display:"flex",gap:6,marginBottom:6,alignItems:"center"}}><input style={{...inp,flex:1}} placeholder="기관명" value={d.org} onChange={e=>{const nd=[...newProj.details];nd[i]={...nd[i],org:e.target.value};setNewProj(p=>({...p,details:nd}));}}/><input style={{...inp,flex:1}} placeholder="금액" value={d.amount} onChange={e=>{const nd=[...newProj.details];nd[i]={...nd[i],amount:e.target.value};setNewProj(p=>({...p,details:nd}));}}/><input style={{...inp,flex:2}} placeholder="특이사항" value={d.note} onChange={e=>{const nd=[...newProj.details];nd[i]={...nd[i],note:e.target.value};setNewProj(p=>({...p,details:nd}));}}/>{newProj.details.length>1&&<span onClick={()=>setNewProj(p=>({...p,details:p.details.filter((_,j)=>j!==i)}))} style={{cursor:"pointer",color:"#94a3b8",fontSize:13}}>✕</span>}</div>))}
-      <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}}><button onClick={()=>setShowAddProj(false)} style={b("#f1f5f9","#64748b")}>취소</button><button onClick={addProject} style={b("#6366f1")}>추가</button></div>
+      <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:14}}><button onClick={()=>{setShowAddProj(false);setEditingProjId(null);}} style={b("#f1f5f9","#64748b")}>취소</button><button onClick={saveProject} style={b("#6366f1")}>{editingProjId?"저장":"추가"}</button></div>
     </div></div>)}
 
     {showAddTask&&(<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200}} onClick={()=>setShowAddTask(false)}><div style={{background:"#fff",borderRadius:14,padding:22,width:390,boxShadow:"0 8px 32px rgba(0,0,0,.2)"}} onClick={e=>e.stopPropagation()}>
