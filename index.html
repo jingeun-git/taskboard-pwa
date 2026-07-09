@@ -724,7 +724,45 @@ function App(){
     setEditingTaskId(null);setNewTask(BLANK_TASK);setShowAddTask(false);
   };
   const quickAdd=({title,pid,category,due})=>{setTasks(t=>[...t,{id:uid(),pid,title,status:category==="LIFE"?"LIFE":"분류대기",category,start:"",due,done:false,created:Date.now()}]);showToast(`"${title}" 추가 완료 (${due} 마감)`);};
-  const toggleDone=id=>setTasks(t=>t.map(x=>x.id===id?{...x,done:!x.done}:x));
+  const getNextRecurrenceDate=(t)=>{
+    if(t.recurrence==="none"||!t.recurrence||!t.due)return null;
+    const proj=PM[t.pid];
+    const maxDate=proj?.deadline||"9999-12-31";
+    const curDate=new Date(t.due);
+    let nextDate=new Date(curDate);
+
+    if(t.recurrence==="daily"){
+      nextDate.setDate(nextDate.getDate()+1);
+    }else if(t.recurrence==="weekly"){
+      const weekdays=t.recurrencePattern?.weekdays||[];
+      for(let i=1;i<=7;i++){
+        const candidate=new Date(curDate);
+        candidate.setDate(candidate.getDate()+i);
+        if(weekdays.includes(candidate.getDay())){
+          nextDate=candidate;break;
+        }
+      }
+    }else if(t.recurrence==="biweekly"){
+      nextDate.setDate(nextDate.getDate()+14);
+    }else if(t.recurrence==="monthly"){
+      const monthday=t.recurrencePattern?.monthday||curDate.getDate();
+      nextDate.setMonth(nextDate.getMonth()+1);
+      nextDate.setDate(monthday);
+    }else if(t.recurrence==="yearly"){
+      nextDate.setFullYear(nextDate.getFullYear()+1);
+    }
+
+    const nextDateStr=fmtD(nextDate);
+    return nextDateStr<=maxDate?nextDateStr:null;
+  };
+  const toggleDone=id=>setTasks(t=>t.map(x=>{
+    if(x.id!==id)return x;
+    if(!x.done&&x.recurrence!=="none"&&x.recurrence){
+      const nextDate=getNextRecurrenceDate(x);
+      if(nextDate)return{...x,due:nextDate,done:false};
+    }
+    return{...x,done:!x.done};
+  }));
   const delTask=id=>setTasks(t=>t.filter(x=>x.id!==id));
   function stats(pid){const ts=pid==="ALL"?tasks:tasks.filter(t=>t.pid===pid);const total=ts.length,done=ts.filter(t=>t.done).length;return{total,done,urgent:ts.filter(t=>!t.done&&t.due&&daysLeft(t.due)>=0&&daysLeft(t.due)<=7).length,overdue:ts.filter(t=>!t.done&&t.due&&daysLeft(t.due)<0).length,pct:total?Math.round(done/total*100):0};}
   function getVisible(){let ts=selPid==="ALL"?tasks:tasks.filter(t=>t.pid===selPid);let filterCat=null;if(selPid==="ALL"&&catFilter!=="전체")filterCat=catFilter;else if(selPid!=="ALL")filterCat=PM[selPid]?.category;if(filterCat)ts=ts.filter(t=>t.category===filterCat);if(filter==="진행중")ts=ts.filter(t=>!t.done);else if(filter==="완료")ts=ts.filter(t=>t.done);else if(filter==="마감임박")ts=ts.filter(t=>!t.done&&t.due&&daysLeft(t.due)>=0&&daysLeft(t.due)<=7);else if(filter==="기한초과")ts=ts.filter(t=>!t.done&&t.due&&daysLeft(t.due)<0);if(sort==="마감순"){return[...ts].sort((a,b)=>{const ad=a.due||"9999-12-31",bd=b.due||"9999-12-31";return ad>bd?1:ad<bd?-1:0;});}if(sort==="상태순")return[...ts].sort((a,b)=>STATUS_OPTS.indexOf(a.status)-STATUS_OPTS.indexOf(b.status));return[...ts].sort((a,b)=>b.created-a.created);}
@@ -951,9 +989,9 @@ function App(){
       </select>
       {projects.find(p=>p.id===newTask.pid)?.deadline&&<div style={{fontSize:10,color:"#94a3b8",marginBottom:10,fontStyle:"italic"}}>📌 프로젝트 기한: {projects.find(p=>p.id===newTask.pid)?.deadline}</div>}
       <div style={{display:"flex",gap:8,marginBottom:10}}><div style={{flex:1}}><label style={lbl}>카테고리</label><select style={inp} value={newTask.category} onChange={e=>setNewTask(p=>({...p,category:e.target.value}))} disabled>{CAT_OPTS.map(c=><option key={c}>{c}</option>)}</select></div><div style={{flex:1.6}}><label style={lbl}>상태</label><select style={inp} value={newTask.status} onChange={e=>setNewTask(p=>({...p,status:e.target.value}))}>{STATUS_OPTS.map(s=><option key={s}>{s}</option>)}</select></div></div>
-      <div style={{display:"flex",gap:8,marginBottom:10}}><div style={{flex:1}}><label style={lbl}>시작일 <span style={{fontWeight:400}}>(선택)</span></label><input type="date" style={inp} value={newTask.start.split('T')[0]} onChange={e=>setNewTask(p=>({...p,start:e.target.value}))}/></div><div style={{flex:0.8}}><label style={lbl}>시간</label><input type="time" style={inp} value={newTask.start.includes('T')?newTask.start.split('T')[1]:""} onChange={e=>setNewTask(p=>({...p,start:e.target.value?`${p.start.split('T')[0]}T${e.target.value}`:""}))}/></div></div>
-      <div style={{display:"flex",gap:8,marginBottom:10}}><div style={{flex:1}}><label style={lbl}>마감일</label><input type="date" style={inp} value={newTask.due} onChange={e=>setNewTask(p=>({...p,due:e.target.value}))}/></div><div style={{flex:0.8}}><label style={lbl}>시간</label><input type="time" style={inp} value={newTask.due.includes('T')?newTask.due.split('T')[1]:""} onChange={e=>setNewTask(p=>({...p,due:e.target.value?`${p.due}T${e.target.value}`:""}))}/></div></div>
-      {newTask.start&&newTask.due&&new Date(newTask.due.split('T')[0])>=new Date(newTask.start.split('T')[0])&&<div style={{fontSize:11,color:"#6366f1",marginBottom:8,fontWeight:600}}>📅 기간: {Math.ceil((new Date(newTask.due.split('T')[0])-new Date(newTask.start.split('T')[0]))/86400000)+1}일</div>}
+      <div style={{marginBottom:10}}><label style={lbl}>시작일 <span style={{fontWeight:400}}>(선택)</span></label><input type="date" style={inp} value={newTask.start} onChange={e=>setNewTask(p=>({...p,start:e.target.value}))}/></div>
+      <div style={{marginBottom:10}}><label style={lbl}>마감일</label><input type="date" style={inp} value={newTask.due} onChange={e=>setNewTask(p=>({...p,due:e.target.value}))}/></div>
+      {newTask.start&&newTask.due&&new Date(newTask.due)>=new Date(newTask.start)&&<div style={{fontSize:11,color:"#6366f1",marginBottom:8,fontWeight:600}}>📅 기간: {Math.ceil((new Date(newTask.due)-new Date(newTask.start))/86400000)+1}일</div>}
       <label style={lbl}>반복 주기</label>
       <select style={{...inp,marginBottom:10}} value={newTask.recurrence} onChange={e=>setNewTask(p=>({...p,recurrence:e.target.value,recurrencePattern:{}}))}>
         {RECURRENCE_OPTS.map(r=><option key={r}>{r}</option>)}
