@@ -152,8 +152,10 @@ function DoneBox({done,onToggle,size=17}){
 
 function ProjInfoPanel({project,onUpdate}){
   const [open,setOpen]=useState(false);
-  const [rows,setRows]=useState(project.details||[]);
-  useEffect(()=>setRows(project.details||[]),[project.id]);
+  const isWork=project.category==="WORK"||!project.category;
+  const [rows,setRows]=useState(isWork?project.details||[]:null);
+  const [notes,setNotes]=useState(!isWork?project.notes||"":null);
+  useEffect(()=>{if(isWork)setRows(project.details||[]);else setNotes(project.notes||"");},[project.id,isWork]);
   const si={padding:"6px 8px",border:"1px solid #e2e8f0",borderRadius:6,fontSize:12,outline:"none",width:"100%",boxSizing:"border-box"};
   return(<div style={{background:"#fff",borderBottom:"1px solid #e2e8f0"}}>
     <div onClick={()=>setOpen(o=>!o)} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 22px",cursor:"pointer",userSelect:"none"}}>
@@ -161,20 +163,27 @@ function ProjInfoPanel({project,onUpdate}){
       <span style={{fontSize:11,color:"#94a3b8"}}>{open?"▲ 닫기":"▼ 펼치기"}</span>
     </div>
     {open&&<div style={{padding:"2px 22px 13px"}}>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-        <span style={{fontSize:11,color:"#94a3b8"}}>관련기관 / 금액 / 특이사항</span>
-        <div style={{display:"flex",gap:6}}>
-          <button onClick={()=>setRows(r=>[...r,{org:"",amount:"",note:""}])} style={{padding:"4px 10px",borderRadius:6,background:"#f1f5f9",color:"#475569",border:"none",fontSize:11,cursor:"pointer",fontWeight:600}}>＋ 항목</button>
-          <button onClick={()=>onUpdate(rows)} style={{padding:"4px 10px",borderRadius:6,background:"#6366f1",color:"#fff",border:"none",fontSize:11,cursor:"pointer",fontWeight:600}}>저장</button>
+      {isWork?<>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+          <span style={{fontSize:11,color:"#94a3b8"}}>관련기관 / 금액 / 수행사 / 특이사항</span>
+          <div style={{display:"flex",gap:6}}>
+            <button onClick={()=>setRows(r=>[...r,{org:"",amount:"",executor:"",note:""}])} style={{padding:"4px 10px",borderRadius:6,background:"#f1f5f9",color:"#475569",border:"none",fontSize:11,cursor:"pointer",fontWeight:600}}>＋ 항목</button>
+            <button onClick={()=>onUpdate(rows,"details")} style={{padding:"4px 10px",borderRadius:6,background:"#6366f1",color:"#fff",border:"none",fontSize:11,cursor:"pointer",fontWeight:600}}>저장</button>
+          </div>
         </div>
-      </div>
-      {rows.length===0&&<div style={{fontSize:12,color:"#cbd5e1"}}>항목 없음</div>}
-      {rows.map((d,i)=>(<div key={i} style={{display:"flex",gap:6,marginBottom:6,alignItems:"center"}}>
-        <input style={{...si,flex:1}} placeholder="기관명" value={d.org} onChange={e=>setRows(r=>r.map((x,j)=>j===i?{...x,org:e.target.value}:x))}/>
-        <input style={{...si,flex:1}} placeholder="금액" value={d.amount} onChange={e=>setRows(r=>r.map((x,j)=>j===i?{...x,amount:e.target.value}:x))}/>
-        <input style={{...si,flex:2}} placeholder="특이사항" value={d.note} onChange={e=>setRows(r=>r.map((x,j)=>j===i?{...x,note:e.target.value}:x))}/>
-        <span onClick={()=>setRows(r=>r.filter((_,j)=>j!==i))} style={{cursor:"pointer",color:"#cbd5e1",fontSize:13,flexShrink:0}}>✕</span>
-      </div>))}
+        {rows.length===0&&<div style={{fontSize:12,color:"#cbd5e1"}}>항목 없음</div>}
+        {rows.map((d,i)=>(<div key={i} style={{display:"flex",gap:4,marginBottom:6,alignItems:"center"}}>
+          <input style={{...si,flex:0.8}} placeholder="기관" value={d.org} onChange={e=>setRows(r=>r.map((x,j)=>j===i?{...x,org:e.target.value}:x))}/>
+          <input style={{...si,flex:0.8}} placeholder="금액" value={d.amount} onChange={e=>setRows(r=>r.map((x,j)=>j===i?{...x,amount:e.target.value}:x))}/>
+          <input style={{...si,flex:0.8}} placeholder="수행사" value={d.executor||""} onChange={e=>setRows(r=>r.map((x,j)=>j===i?{...x,executor:e.target.value}:x))}/>
+          <input style={{...si,flex:1}} placeholder="특이사항" value={d.note} onChange={e=>setRows(r=>r.map((x,j)=>j===i?{...x,note:e.target.value}:x))}/>
+          <span onClick={()=>setRows(r=>r.filter((_,j)=>j!==i))} style={{cursor:"pointer",color:"#cbd5e1",fontSize:13,flexShrink:0}}>✕</span>
+        </div>))}</>:<>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+          <span style={{fontSize:11,color:"#94a3b8"}}>비고</span>
+          <button onClick={()=>onUpdate(notes,"notes")} style={{padding:"4px 10px",borderRadius:6,background:"#6366f1",color:"#fff",border:"none",fontSize:11,cursor:"pointer",fontWeight:600}}>저장</button>
+        </div>
+        <textarea style={{...si,minHeight:60,resize:"vertical",fontFamily:"inherit"}} placeholder="비고" value={notes} onChange={e=>setNotes(e.target.value)}/></>}
     </div>}
   </div>);
 }
@@ -684,7 +693,9 @@ function App(){
     const notes=newProj.category==="LIFE"?newProj.notes:"";
     const deadline=newProj.deadline||"";
     if(editingProjId){
+      const oldProj=projects.find(p=>p.id===editingProjId);
       setProjects(p=>p.map(x=>x.id===editingProjId?{...x,name:newProj.name.trim(),color:newProj.color,category:newProj.category,deadline,details,notes}:x));
+      setTasks(t=>t.map(tk=>tk.pid===editingProjId&&tk.recurrence!=="none"?{...tk,recurrenceEndDate:deadline}:tk));
       showToast(`"${newProj.name.trim()}" 프로젝트 수정 완료`);
     }else{
       setProjects(p=>[...p,{id:uid(),name:newProj.name.trim(),color:newProj.color,category:newProj.category,deadline,details,notes}]);
@@ -693,7 +704,7 @@ function App(){
   };
   const delProject=pid=>{setProjects(p=>p.filter(x=>x.id!==pid));setTasks(t=>t.filter(x=>x.pid!==pid));if(selPid===pid)setSelPid("ALL");};
   const BLANK_TASK={title:"",status:"분류대기",category:"WORK",start:"",due:"",pid:"",recurrence:"none",recurrencePattern:{},recurrenceEndDate:""};
-  const openAddTask=()=>{setEditingTaskId(null);setNewTask({...BLANK_TASK,pid:selPid!=="ALL"?selPid:""});setShowAddTask(true);};
+  const openAddTask=()=>{const selectedProj=selPid!=="ALL"?projects.find(p=>p.id===selPid):null;setEditingTaskId(null);setNewTask({...BLANK_TASK,pid:selPid!=="ALL"?selPid:"",category:selectedProj?.category||"WORK"});setShowAddTask(true);};
   const openEditTask=t=>{setEditingTaskId(t.id);setNewTask({title:t.title,status:t.status,category:t.category,start:t.start||"",due:t.due||"",pid:t.pid,recurrence:t.recurrence||"none",recurrencePattern:t.recurrencePattern||{},recurrenceEndDate:t.recurrenceEndDate||""});setShowAddTask(true);};
   const saveTask=()=>{
     if(!newTask.title.trim())return;
@@ -716,7 +727,7 @@ function App(){
   const toggleDone=id=>setTasks(t=>t.map(x=>x.id===id?{...x,done:!x.done}:x));
   const delTask=id=>setTasks(t=>t.filter(x=>x.id!==id));
   function stats(pid){const ts=pid==="ALL"?tasks:tasks.filter(t=>t.pid===pid);const total=ts.length,done=ts.filter(t=>t.done).length;return{total,done,urgent:ts.filter(t=>!t.done&&t.due&&daysLeft(t.due)>=0&&daysLeft(t.due)<=7).length,overdue:ts.filter(t=>!t.done&&t.due&&daysLeft(t.due)<0).length,pct:total?Math.round(done/total*100):0};}
-  function getVisible(){let ts=selPid==="ALL"?tasks:tasks.filter(t=>t.pid===selPid);const projCat=selPid!=="ALL"?PM[selPid]?.category:null;if(projCat)ts=ts.filter(t=>t.category===projCat);if(filter==="진행중")ts=ts.filter(t=>!t.done);else if(filter==="완료")ts=ts.filter(t=>t.done);else if(filter==="마감임박")ts=ts.filter(t=>!t.done&&t.due&&daysLeft(t.due)>=0&&daysLeft(t.due)<=7);else if(filter==="기한초과")ts=ts.filter(t=>!t.done&&t.due&&daysLeft(t.due)<0);if(sort==="마감순"){return[...ts].sort((a,b)=>{const ad=a.due||"9999-12-31",bd=b.due||"9999-12-31";return ad>bd?1:ad<bd?-1:0;});}if(sort==="상태순")return[...ts].sort((a,b)=>STATUS_OPTS.indexOf(a.status)-STATUS_OPTS.indexOf(b.status));return[...ts].sort((a,b)=>b.created-a.created);}
+  function getVisible(){let ts=selPid==="ALL"?tasks:tasks.filter(t=>t.pid===selPid);let filterCat=null;if(selPid==="ALL"&&catFilter!=="전체")filterCat=catFilter;else if(selPid!=="ALL")filterCat=PM[selPid]?.category;if(filterCat)ts=ts.filter(t=>t.category===filterCat);if(filter==="진행중")ts=ts.filter(t=>!t.done);else if(filter==="완료")ts=ts.filter(t=>t.done);else if(filter==="마감임박")ts=ts.filter(t=>!t.done&&t.due&&daysLeft(t.due)>=0&&daysLeft(t.due)<=7);else if(filter==="기한초과")ts=ts.filter(t=>!t.done&&t.due&&daysLeft(t.due)<0);if(sort==="마감순"){return[...ts].sort((a,b)=>{const ad=a.due||"9999-12-31",bd=b.due||"9999-12-31";return ad>bd?1:ad<bd?-1:0;});}if(sort==="상태순")return[...ts].sort((a,b)=>STATUS_OPTS.indexOf(a.status)-STATUS_OPTS.indexOf(b.status));return[...ts].sort((a,b)=>b.created-a.created);}
 
   // ── 엑셀 내보내기 (xlsx-js-style — 헤더 음영·테두리·색상 서식 적용) ──
   const doExport=()=>{
@@ -798,7 +809,8 @@ function App(){
         <div style={{width:224,display:"flex",flexDirection:"column",height:"100%"}}>
           <div style={{flex:1,overflowY:"auto",padding:"10px 0"}}>
             <div onClick={()=>{setSelPid("ALL");setView("proj");}} style={{display:"flex",alignItems:"center",gap:8,padding:"9px 18px",cursor:"pointer",background:selPid==="ALL"&&view==="proj"?"#334155":"transparent",color:selPid==="ALL"?"#fff":"#94a3b8",fontSize:13,userSelect:"none"}}><span>🗂</span><span style={{flex:1}}>전체 프로젝트</span><span style={{fontSize:10,background:"#475569",padding:"1px 6px",borderRadius:10}}>{tasks.length}</span></div>
-            {projects.map(p=>(<div key={p.id} onClick={()=>{setSelPid(p.id);setView("proj");}} style={{display:"flex",alignItems:"center",gap:8,padding:"9px 18px",cursor:"pointer",background:selPid===p.id&&view==="proj"?"#334155":"transparent",color:selPid===p.id?"#fff":"#94a3b8",fontSize:13,userSelect:"none"}}><span style={{width:8,height:8,borderRadius:"50%",background:p.color,flexShrink:0}}/><span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name}</span><span style={{fontSize:10,background:"#475569",padding:"1px 6px",borderRadius:10,flexShrink:0}}>{tasks.filter(t=>t.pid===p.id).length}</span><span onClick={e=>{e.stopPropagation();openEditProj(p);}} title="프로젝트 수정" style={{fontSize:11,color:"#64748b",cursor:"pointer",marginLeft:2}}>✏</span><span onClick={e=>{e.stopPropagation();if(confirm(`"${p.name}" 프로젝트를 삭제하시겠습니까? 소속 태스크 ${tasks.filter(t=>t.pid===p.id).length}건도 함께 삭제됩니다.`))delProject(p.id);}} title="프로젝트 삭제" style={{fontSize:12,color:"#64748b",cursor:"pointer",marginLeft:2}}>✕</span></div>))}
+            {projects.filter(p=>p.category==="WORK"||!p.category).length>0&&<><div style={{padding:"6px 18px",marginTop:4,fontSize:11,fontWeight:700,color:"#64748b"}}>💼 WORK</div>{projects.filter(p=>p.category==="WORK"||!p.category).map(p=>(<div key={p.id} onClick={()=>{setSelPid(p.id);setView("proj");}} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 18px",cursor:"pointer",background:selPid===p.id&&view==="proj"?"#334155":"transparent",color:selPid===p.id?"#fff":"#94a3b8",fontSize:13,userSelect:"none"}}><span style={{width:8,height:8,borderRadius:"50%",background:p.color,flexShrink:0}}/><span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:12}}>{p.name}</span><span style={{fontSize:10,background:"#475569",padding:"1px 6px",borderRadius:10,flexShrink:0}}>{tasks.filter(t=>t.pid===p.id).length}</span><span onClick={e=>{e.stopPropagation();openEditProj(p);}} title="프로젝트 수정" style={{fontSize:11,color:"#64748b",cursor:"pointer",marginLeft:2}}>✏</span><span onClick={e=>{e.stopPropagation();if(confirm(`"${p.name}" 프로젝트를 삭제하시겠습니까? 소속 태스크 ${tasks.filter(t=>t.pid===p.id).length}건도 함께 삭제됩니다.`))delProject(p.id);}} title="프로젝트 삭제" style={{fontSize:12,color:"#64748b",cursor:"pointer",marginLeft:2}}>✕</span></div>))}</>}
+            {projects.filter(p=>p.category==="LIFE").length>0&&<><div style={{padding:"6px 18px",marginTop:6,fontSize:11,fontWeight:700,color:"#64748b"}}>🎯 LIFE</div>{projects.filter(p=>p.category==="LIFE").map(p=>(<div key={p.id} onClick={()=>{setSelPid(p.id);setView("proj");}} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 18px",cursor:"pointer",background:selPid===p.id&&view==="proj"?"#334155":"transparent",color:selPid===p.id?"#fff":"#94a3b8",fontSize:13,userSelect:"none"}}><span style={{width:8,height:8,borderRadius:"50%",background:p.color,flexShrink:0}}/><span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:12}}>{p.name}</span><span style={{fontSize:10,background:"#475569",padding:"1px 6px",borderRadius:10,flexShrink:0}}>{tasks.filter(t=>t.pid===p.id).length}</span><span onClick={e=>{e.stopPropagation();openEditProj(p);}} title="프로젝트 수정" style={{fontSize:11,color:"#64748b",cursor:"pointer",marginLeft:2}}>✏</span><span onClick={e=>{e.stopPropagation();if(confirm(`"${p.name}" 프로젝트를 삭제하시겠습니까? 소속 태스크 ${tasks.filter(t=>t.pid===p.id).length}건도 함께 삭제됩니다.`))delProject(p.id);}} title="프로젝트 삭제" style={{fontSize:12,color:"#64748b",cursor:"pointer",marginLeft:2}}>✕</span></div>))}</>}
           </div>
           <div style={{padding:"12px 14px",borderTop:"1px solid #334155",display:"flex",flexDirection:"column",gap:6}}>
             {notifPerm!=="granted"&&<button onClick={async()=>{if("Notification" in window){const p=await Notification.requestPermission();setNotifPerm(p);}}} style={{...b("#f59e0b"),fontSize:11,display:"flex",justifyContent:"center"}}>🔔 알림 권한 허용</button>}
@@ -817,6 +829,7 @@ function App(){
           <div style={{display:"flex",alignItems:"center",gap:8}}>
             <div>
               <div style={{fontWeight:700,fontSize:15,color:"#1e293b",display:"flex",alignItems:"center",gap:7}}>
+                <span>{selPid==="ALL"?"🗂":"📁"}</span>
                 {selPid==="ALL"?"전체 프로젝트":PM[selPid]?.name}
                 {SelP&&<span onClick={()=>openEditProj(SelP)} title="프로젝트 수정(이름·색상·기한·상세정보)" style={{cursor:"pointer",fontSize:12,color:"#94a3b8"}}>✏</span>}
               </div>
@@ -830,9 +843,11 @@ function App(){
         <div style={{display:"flex",gap:10,padding:"12px 22px",background:"#fff",borderBottom:"1px solid #e2e8f0"}}>
           {[{l:"전체",n:cs.total,c:"#6366f1"},{l:"완료",n:cs.done,c:"#10b981"},{l:"마감임박(7일)",n:cs.urgent,c:"#f59e0b"},{l:"기한초과",n:cs.overdue,c:"#ef4444"}].map(x=>(<div key={x.l} style={{flex:1,background:"#f8fafc",borderRadius:9,padding:"10px 14px",borderTop:`3px solid ${x.c}`}}><div style={{fontSize:20,fontWeight:700,color:"#1e293b"}}>{x.n}</div><div style={{fontSize:10,color:"#94a3b8",marginTop:1}}>{x.l}</div>{x.l==="완료"&&<div style={{marginTop:4}}><GaugeBar pct={cs.pct} color={x.c} h={3}/></div>}</div>))}
         </div>
-        {SelP&&<ProjInfoPanel project={SelP} onUpdate={d=>setProjects(p=>p.map(x=>x.id===SelP.id?{...x,details:d}:x))}/>}
+        {SelP&&<ProjInfoPanel project={SelP} onUpdate={(data,field)=>setProjects(p=>p.map(x=>x.id===SelP.id?{...x,[field]:data}:x))}/>}
         <div style={{display:"flex",gap:5,padding:"9px 22px",alignItems:"center",flexWrap:"wrap",background:"#fff",borderBottom:"1px solid #e2e8f0"}}>
-          {["전체","진행중","마감임박","완료","기한초과"].map(f=>(<button key={f} onClick={()=>setFilter(f)} style={{padding:"4px 10px",borderRadius:20,border:`1px solid ${filter===f?"#6366f1":"#e2e8f0"}`,background:filter===f?"#6366f1":"transparent",color:filter===f?"#fff":"#64748b",fontSize:11,cursor:"pointer",fontWeight:filter===f?600:400}}>{f}</button>))}
+          {selPid==="ALL"&&["전체","WORK","LIFE"].map(c=>(<button key={c} onClick={()=>setCatFilter(c)} style={{padding:"4px 10px",borderRadius:20,border:`1px solid ${catFilter===c?(c==="WORK"?"#3b82f6":c==="LIFE"?"#10b981":"#6366f1"):"#e2e8f0"}`,background:catFilter===c?(c==="WORK"?"#3b82f6":c==="LIFE"?"#10b981":"#6366f1"):"transparent",color:catFilter===c?"#fff":"#64748b",fontSize:11,cursor:"pointer",fontWeight:catFilter===c?600:400}}>{c==="전체"?"🗂 전체":c}</button>))}
+          {selPid==="ALL"&&<div style={{width:1,height:16,background:"#e2e8f0",margin:"0 2px"}}/>}
+          {["마감임박","진행중","완료","기한초과","전체"].map(f=>(<button key={f} onClick={()=>setFilter(f)} style={{padding:"4px 10px",borderRadius:20,border:`1px solid ${filter===f?"#6366f1":"#e2e8f0"}`,background:filter===f?"#6366f1":"transparent",color:filter===f?"#fff":"#64748b",fontSize:11,cursor:"pointer",fontWeight:filter===f?600:400}}>{f}</button>))}
           <select value={sort} onChange={e=>setSort(e.target.value)} style={{padding:"4px 8px",border:"1px solid #e2e8f0",borderRadius:7,fontSize:11,color:"#475569",outline:"none",marginLeft:"auto",background:"#fff"}}>{["마감순","상태순","생성일순"].map(o=><option key={o}>{o}</option>)}</select>
         </div>
         <div style={{flex:1,overflowY:"auto",padding:"12px 22px"}}>
@@ -918,11 +933,11 @@ function App(){
       <div style={{fontWeight:700,fontSize:14,marginBottom:14}}>{editingProjId?"✏ 프로젝트 수정":"새 프로젝트"}</div>
       <label style={lbl}>프로젝트명</label><input style={{...inp,marginBottom:14}} value={newProj.name} onChange={e=>setNewProj(p=>({...p,name:e.target.value}))} placeholder="프로젝트명" autoFocus onKeyDown={e=>e.key==="Enter"&&saveProject()}/>
       <div style={{display:"flex",gap:8,marginBottom:14}}><label style={{flex:1,display:"flex",alignItems:"center",gap:8,padding:"8px 12px",borderRadius:8,border:`2px solid ${newProj.category==="WORK"?"#6366f1":"#e2e8f0"}`,background:newProj.category==="WORK"?"#eef2ff":"#fff",cursor:"pointer",fontSize:13,fontWeight:600,color:newProj.category==="WORK"?"#6366f1":"#94a3b8"}}><input type="radio" checked={newProj.category==="WORK"} onChange={()=>setNewProj(p=>({...p,category:"WORK"}))} style={{accentColor:"#6366f1"}}/><span style={{color:newProj.category==="WORK"?"#1e293b":"#64748b"}}>💼 WORK</span></label><label style={{flex:1,display:"flex",alignItems:"center",gap:8,padding:"8px 12px",borderRadius:8,border:`2px solid ${newProj.category==="LIFE"?"#10b981":"#e2e8f0"}`,background:newProj.category==="LIFE"?"#ecfdf5":"#fff",cursor:"pointer",fontSize:13,fontWeight:600,color:newProj.category==="LIFE"?"#10b981":"#94a3b8"}}><input type="radio" checked={newProj.category==="LIFE"} onChange={()=>setNewProj(p=>({...p,category:"LIFE"}))} style={{accentColor:"#10b981"}}/><span style={{color:newProj.category==="LIFE"?"#1e293b":"#64748b"}}>🎯 LIFE</span></label></div>
-      <label style={lbl}>색상 선택</label><div style={{display:"flex",gap:7,marginBottom:14}}>{COLORS.map(c=><div key={c} onClick={()=>setNewProj(p=>({...p,color:c}))} style={{width:26,height:26,borderRadius:"50%",background:c,cursor:"pointer",border:newProj.color===c?"3px solid #1e293b":"3px solid transparent",transition:"border .2s"}}/>)}</div>
+      <label style={lbl}>색상 선택</label><div style={{display:"flex",gap:8,alignItems:"center",marginBottom:14}}><input type="color" value={newProj.color} onChange={e=>setNewProj(p=>({...p,color:e.target.value}))} style={{width:50,height:40,borderRadius:8,border:"1px solid #e2e8f0",cursor:"pointer"}}/><div style={{display:"flex",gap:6}}>{COLORS.map(c=><div key={c} onClick={()=>setNewProj(p=>({...p,color:c}))} style={{width:26,height:26,borderRadius:"50%",background:c,cursor:"pointer",border:newProj.color===c?"3px solid #1e293b":"1px solid #e2e8f0",transition:"border .2s"}}/>)}</div></div>
       <label style={lbl}>프로젝트 기한 <span style={{fontWeight:400}}>(선택)</span></label>
       <input type="date" style={{...inp,marginBottom:14,maxWidth:200}} value={newProj.deadline} onChange={e=>setNewProj(p=>({...p,deadline:e.target.value}))}/>
-      {newProj.category==="WORK"&&(<><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}><label style={{...lbl,marginBottom:0}}>관련기관 / 금액 / 수행사 / 특이사항</label><button onClick={()=>setNewProj(p=>({...p,details:[...p.details,{org:"",amount:"",note:""}]}))} style={{...b("#f1f5f9","#64748b"),padding:"4px 10px",fontSize:11}}>＋ 항목</button></div>
-      {newProj.details.map((d,i)=>(<div key={i} style={{display:"flex",gap:6,marginBottom:6,alignItems:"center"}}><input style={{...inp,flex:0.8}} placeholder="기관" value={d.org} onChange={e=>{const nd=[...newProj.details];nd[i]={...nd[i],org:e.target.value};setNewProj(p=>({...p,details:nd}));}}/><input style={{...inp,flex:0.8}} placeholder="금액" value={d.amount} onChange={e=>{const nd=[...newProj.details];nd[i]={...nd[i],amount:e.target.value};setNewProj(p=>({...p,details:nd}));}}/><input style={{...inp,flex:1.2}} placeholder="특이사항" value={d.note} onChange={e=>{const nd=[...newProj.details];nd[i]={...nd[i],note:e.target.value};setNewProj(p=>({...p,details:nd}));}}/>{newProj.details.length>1&&<span onClick={()=>setNewProj(p=>({...p,details:p.details.filter((_,j)=>j!==i)}))} style={{cursor:"pointer",color:"#94a3b8",fontSize:13,flexShrink:0}}>✕</span>}</div>))}</>)}
+      {newProj.category==="WORK"&&(<><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}><label style={{...lbl,marginBottom:0}}>관련기관 / 금액 / 수행사 / 특이사항</label><button onClick={()=>setNewProj(p=>({...p,details:[...p.details,{org:"",amount:"",executor:"",note:""}]}))} style={{...b("#f1f5f9","#64748b"),padding:"4px 10px",fontSize:11}}>＋ 항목</button></div>
+      {newProj.details.map((d,i)=>(<div key={i} style={{display:"flex",gap:4,marginBottom:6,alignItems:"center"}}><input style={{...inp,flex:0.8}} placeholder="기관" value={d.org} onChange={e=>{const nd=[...newProj.details];nd[i]={...nd[i],org:e.target.value};setNewProj(p=>({...p,details:nd}));}}/><input style={{...inp,flex:0.8}} placeholder="금액" value={d.amount} onChange={e=>{const nd=[...newProj.details];nd[i]={...nd[i],amount:e.target.value};setNewProj(p=>({...p,details:nd}));}}/><input style={{...inp,flex:0.8}} placeholder="수행사" value={d.executor||""} onChange={e=>{const nd=[...newProj.details];nd[i]={...nd[i],executor:e.target.value};setNewProj(p=>({...p,details:nd}));}}/><input style={{...inp,flex:1}} placeholder="특이사항" value={d.note} onChange={e=>{const nd=[...newProj.details];nd[i]={...nd[i],note:e.target.value};setNewProj(p=>({...p,details:nd}));}}/>{newProj.details.length>1&&<span onClick={()=>setNewProj(p=>({...p,details:p.details.filter((_,j)=>j!==i)}))} style={{cursor:"pointer",color:"#94a3b8",fontSize:13,flexShrink:0}}>✕</span>}</div>))}</>)}
       {newProj.category==="LIFE"&&(<><label style={lbl}>비고</label><textarea style={{...inp,marginBottom:14,minHeight:60,resize:"vertical",fontFamily:"inherit"}} value={newProj.notes} onChange={e=>setNewProj(p=>({...p,notes:e.target.value}))} placeholder="비고 (선택)"/></>)}
       <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}><button onClick={()=>{setShowAddProj(false);setEditingProjId(null);}} style={b("#f1f5f9","#64748b")}>취소</button><button onClick={saveProject} style={b("#6366f1")}>{editingProjId?"저장":"추가"}</button></div>
     </div></div>)}
