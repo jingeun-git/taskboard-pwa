@@ -15,6 +15,7 @@ html,body{margin:0;padding:0;background:#f1f5f9;-webkit-tap-highlight-color:tran
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone@7.29.7/babel.min.js"></script>
 <script src="https://unpkg.com/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
 <div id="root"></div>
@@ -22,24 +23,32 @@ html,body{margin:0;padding:0;background:#f1f5f9;-webkit-tap-highlight-color:tran
 const {useState,useEffect,useRef}=React;
 
 // ══════════════════════════════════════════════════════════════════
-// 클라우드 동기화 계층 (Apps Script 백엔드)
+// 클라우드 동기화 계층 (Apps Script 백엔드) — Google 계정 로그인(세션 토큰) 기반
+// 과거 공유 비밀 토큰(APP_SECRET) 방식은 GitHub Pages가 Public이라 페이지 소스에 그대로
+// 노출되는 구조적 한계가 있어 폐기 — household_ledger와 동일한 클라이언트 ID·메커니즘 재사용.
 // ══════════════════════════════════════════════════════════════════
 
 const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw7JLmbKqOmxzeysBpy-8IdZ3xyTliQzHZ7QqgkUcvABKSLCy80rj2F3XNRMpdqqUX3_A/exec";
-const APP_SECRET = "81f522b36303929a2088f8c641ae5c3bc098fb2919fe89e8";
+const GOOGLE_CLIENT_ID = "457529892194-utbnqihap22pf00a4t71tq27e6gedp92.apps.googleusercontent.com";
 const SYNC_INTERVAL_MS = 30000; // 30초 폴링 — 노트북↔모바일 양방향 반영
+const SESSION_STORAGE_KEY = "taskboard_session_token";
+
+const getSessionToken=()=>localStorage.getItem(SESSION_STORAGE_KEY);
+const setSessionToken=(t)=>{ if(t) localStorage.setItem(SESSION_STORAGE_KEY,t); else localStorage.removeItem(SESSION_STORAGE_KEY); };
 
 async function cloudGetAll(){
-  const res = await fetch(`${APPS_SCRIPT_URL}?t=${Date.now()}&secret=${encodeURIComponent(APP_SECRET)}`);
+  const token=getSessionToken();
+  const res = await fetch(`${APPS_SCRIPT_URL}?t=${Date.now()}&token=${encodeURIComponent(token||"")}`);
   if(!res.ok) throw new Error("cloud fetch failed: "+res.status);
   const data = await res.json();
-  if(data.ok===false) throw new Error(data.error||"인증 실패 — APP_SECRET을 확인하세요");
+  if(data.ok===false) throw new Error(data.error||"unauthorized");
   return data;
 }
 async function cloudPost(payload){
   // Content-Type text/plain 사유: Apps Script는 CORS preflight(OPTIONS)를 처리하지
   // 않으므로 simple request로 보내야 브라우저가 막지 않는다.
-  const res = await fetch(APPS_SCRIPT_URL,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({...payload,secret:APP_SECRET})});
+  const token=getSessionToken();
+  const res = await fetch(APPS_SCRIPT_URL,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({...payload,token})});
   if(!res.ok) throw new Error("cloud post failed: "+res.status);
   return await res.json();
 }
@@ -53,6 +62,8 @@ const notionUpsert=(pageId,databaseId,properties)=>cloudPost({action:"notionUpse
 const notionStatusReq=()=>cloudPost({action:"notionStatus"});
 const setNotionTokenReq=(token)=>cloudPost({action:"setNotionToken",token});
 const gcalSyncReq=(tasks)=>cloudPost({action:"gcalSync",tasks});
+const googleLoginReq=(idToken)=>cloudPost({action:"googleLogin",idToken});
+const logoutReq=()=>cloudPost({action:"logout"});
 
 // ══════════════════════════════════════════════════════════════════
 // 상수·헬퍼
@@ -430,10 +441,64 @@ function DayPanel({ds,tasks,projects,PM,onClose,onToggle,onDelete,onQuickAdd}){
 }
 
 // ══════════════════════════════════════════════════════════════════
+// 로그인 화면 — 등록된 Google 계정만 통과(허용목록은 Apps Script ALLOWED_EMAILS에서 관리)
+// ══════════════════════════════════════════════════════════════════
+
+const LOGIN_ERR_MSG={
+  not_allowed:"등록되지 않은 계정입니다 — 관리자에게 계정 등록을 요청하세요",
+  invalid_token:"로그인 확인에 실패했습니다 — 다시 시도해주세요",
+  client_mismatch:"앱 설정 오류(클라이언트 ID 불일치) — 관리자에게 문의하세요",
+  email_not_verified:"이메일이 확인되지 않은 계정입니다",
+  missing_token:"로그인 정보를 받지 못했습니다 — 다시 시도해주세요",
+};
+
+function LoginScreen({onLoggedIn}){
+  const btnRef=useRef(null);
+  const [err,setErr]=useState("");
+  const [busy,setBusy]=useState(false);
+
+  useEffect(()=>{
+    let cancelled=false;
+    const tryInit=()=>{
+      if(cancelled) return;
+      if(!window.google||!window.google.accounts||!window.google.accounts.id){ setTimeout(tryInit,200); return; }
+      window.google.accounts.id.initialize({
+        client_id: GOOGLE_CLIENT_ID,
+        callback: async (resp)=>{
+          setBusy(true); setErr("");
+          try{
+            const r=await googleLoginReq(resp.credential);
+            if(!r.ok) throw new Error(LOGIN_ERR_MSG[r.error]||r.error||"로그인 실패");
+            setSessionToken(r.token);
+            onLoggedIn();
+          }catch(e){ setErr(e.message); }
+          setBusy(false);
+        }
+      });
+      if(btnRef.current) window.google.accounts.id.renderButton(btnRef.current,{theme:"outline",size:"large",width:272});
+    };
+    tryInit();
+    return ()=>{ cancelled=true; };
+  },[]);
+
+  return(<div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",background:"#f1f5f9",fontFamily:"system-ui,-apple-system,'Segoe UI',sans-serif"}}>
+    <div style={{background:"#fff",borderRadius:16,padding:"38px 34px",boxShadow:"0 4px 24px rgba(15,23,42,.08)",textAlign:"center",width:320,border:"1px solid #e2e8f0"}}>
+      <div style={{fontSize:34,marginBottom:10}}>🗂</div>
+      <div style={{fontWeight:800,fontSize:17,color:"#1e293b",marginBottom:6}}>TaskBoard</div>
+      <div style={{fontSize:12,color:"#94a3b8",marginBottom:22}}>등록된 Google 계정으로 로그인하세요</div>
+      <div ref={btnRef} style={{display:"flex",justifyContent:"center"}}/>
+      {busy&&<div style={{fontSize:12,color:"#94a3b8",marginTop:14}}>로그인 처리 중...</div>}
+      {err&&<div style={{fontSize:12,color:"#ef4444",marginTop:14}}>{err}</div>}
+    </div>
+  </div>);
+}
+
+// ══════════════════════════════════════════════════════════════════
 // 메인 App
 // ══════════════════════════════════════════════════════════════════
 
 function App(){
+  const [authed,setAuthed]=useState(()=>!!getSessionToken());
   const [projects,setProjects]=useState(null);
   const [tasks,setTasks]=useState(null);
   const [selPid,setSelPid]=useState("ALL");
@@ -476,8 +541,12 @@ function App(){
   const lastSyncRef=useRef({});
   const skipSaveRef=useRef(new Set());
 
+  // 세션 만료·거부 시 공통 처리 — 토큰을 지우고 로그인 화면으로 되돌린다
+  const forceLogout=()=>{ setSessionToken(null); setAuthed(false); setLoaded(false); };
+
   // ── 최초 로드 ────────────────────────────────────────────────
   useEffect(()=>{
+    if(!authed) return;
     async function load(){
       try{
         const all=await cloudGetAll();
@@ -493,6 +562,7 @@ function App(){
         if(wg&&wg.value)setWidgetsRaw({...DEF_WIDGETS,...JSON.parse(wg.value)});
         setCloudOk(true);
       }catch(e){
+        if(String(e.message).includes("unauthorized")){ forceLogout(); return; }
         console.error("클라우드 로드 실패 — APPS_SCRIPT_URL 설정을 확인하세요:",e);
         setCloudOk(false);
         setProjects(DEF_PROJ);setTasks(DEF_TASKS);
@@ -501,7 +571,7 @@ function App(){
       if("Notification" in window)setNotifPerm(Notification.permission);
     }
     load();
-  },[]);
+  },[authed]);
 
   // ── 로컬 변경 → 클라우드 저장 (write-through) ───────────────────
   useEffect(()=>{
@@ -547,7 +617,10 @@ function App(){
           lastSyncRef.current.tmv3_widgets=all.tmv3_widgets.updatedAt;
           setWidgetsRaw({...DEF_WIDGETS,...JSON.parse(all.tmv3_widgets.value)});
         }
-      }catch(e){setCloudOk(false);}
+      }catch(e){
+        if(String(e.message).includes("unauthorized")){ forceLogout(); return; }
+        setCloudOk(false);
+      }
     },SYNC_INTERVAL_MS);
     return ()=>clearInterval(iv);
   },[loaded]);
@@ -583,7 +656,9 @@ function App(){
     }).catch(()=>setTokenState("unknown"));
   },[showNotion]);
 
+  if(!authed) return <LoginScreen onLoggedIn={()=>setAuthed(true)}/>;
   if(!loaded||!projects||!tasks)return <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",color:"#94a3b8",fontSize:14}}>불러오는 중...</div>;
+  const doLogout=async()=>{ try{ await logoutReq(); }catch(e){} forceLogout(); };
   const PM=Object.fromEntries(projects.map(p=>[p.id,p]));
   const showToast=(msg,ok=true)=>{setToast({msg,ok});setTimeout(()=>setToast(null),3500);};
   const extractDbId=url=>{const m=(url||"").replace(/-/g,"").match(/[a-f0-9]{32}/i);if(!m)return null;const id=m[0];return`${id.slice(0,8)}-${id.slice(8,12)}-${id.slice(12,16)}-${id.slice(16,20)}-${id.slice(20)}`;};
@@ -855,6 +930,7 @@ function App(){
             <button onClick={()=>setShowNotion(true)} style={{...b("#059669"),fontSize:11,display:"flex",justifyContent:"center",alignItems:"center",gap:4}}>🔗 Notion: {(notionCfg.dbName||"todolist 2").slice(0,11)}</button>
             <button onClick={openAddProj} style={{...b("#334155"),fontSize:11,display:"flex",justifyContent:"center"}}>＋ 프로젝트 추가</button>
             <button onClick={()=>setShowExport(true)} style={{...b("#10b981"),fontSize:11,display:"flex",justifyContent:"center"}}>📥 엑셀 내보내기</button>
+            <button onClick={doLogout} style={{...b("transparent","#94a3b8"),fontSize:11,display:"flex",justifyContent:"center",border:"1px solid #334155"}}>로그아웃</button>
           </div>
         </div>
       </div>
@@ -996,7 +1072,7 @@ function App(){
       <select style={{...inp,marginBottom:10}} value={newTask.recurrence} onChange={e=>setNewTask(p=>({...p,recurrence:e.target.value,recurrencePattern:{}}))}>
         {RECURRENCE_OPTS.map(r=><option key={r}>{r}</option>)}
       </select>
-      {newTask.recurrence==="weekly"&&<><label style={lbl}>반복 요일 선택</label><div style={{display:"flex",gap:4,marginBottom:10}}>{WD.map((w,i)=><button key={i} onClick={()=>{const wd=newTask.recurrencePattern?.weekdays||[];const idx=wd.indexOf(i);if(idx>-1){const nwd=[...wd];nwd.splice(idx,1);setNewTask(p=>({...p,recurrencePattern:{weekdays:nwd}}));}else{setNewTask(p=>({...p,recurrencePattern:{weekdays:[...(p.recurrencePattern?.weekdays||[]),i].sort()}}));}}} style={{width:28,height:28,borderRadius:6,border:`2px solid ${(newTask.recurrencePattern?.weekdays||[]).includes(i)?"#6366f1":"#cbd5e1"}`,background:(newTask.recurrencePattern?.weekdays||[]).includes(i)?"#6366f1":"#fff",color:(newTask.recurrencePattern?.weekdays||[]).includes(i)?"#fff":"#64748b",fontSize:11,fontWeight:600,cursor:"pointer"}}>{w}</button>)}}</div></>}
+      {newTask.recurrence==="weekly"&&<><label style={lbl}>반복 요일 선택</label><div style={{display:"flex",gap:4,marginBottom:10}}>{WD.map((w,i)=><button key={i} onClick={()=>{const wd=newTask.recurrencePattern?.weekdays||[];const idx=wd.indexOf(i);if(idx>-1){const nwd=[...wd];nwd.splice(idx,1);setNewTask(p=>({...p,recurrencePattern:{weekdays:nwd}}));}else{setNewTask(p=>({...p,recurrencePattern:{weekdays:[...(p.recurrencePattern?.weekdays||[]),i].sort()}}));}}} style={{width:28,height:28,borderRadius:6,border:`2px solid ${(newTask.recurrencePattern?.weekdays||[]).includes(i)?"#6366f1":"#cbd5e1"}`,background:(newTask.recurrencePattern?.weekdays||[]).includes(i)?"#6366f1":"#fff",color:(newTask.recurrencePattern?.weekdays||[]).includes(i)?"#fff":"#64748b",fontSize:11,fontWeight:600,cursor:"pointer"}}>{w}</button>)}</div></>}
       {newTask.recurrence==="monthly"&&<><label style={lbl}>반복 일자</label><input type="number" style={{...inp,marginBottom:10,maxWidth:80}} min="1" max="31" value={newTask.recurrencePattern?.monthday||1} onChange={e=>setNewTask(p=>({...p,recurrencePattern:{monthday:Number(e.target.value)}}))} placeholder="1"/></>}
       <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:12}}><button onClick={()=>{setShowAddTask(false);setEditingTaskId(null);}} style={b("#f1f5f9","#64748b")}>취소</button><button onClick={saveTask} style={b("#6366f1")}>{editingTaskId?"저장":"추가"}</button></div>
     </div></div>)}
