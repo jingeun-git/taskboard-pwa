@@ -1,0 +1,1100 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>TaskBoard</title>
+<meta name="theme-color" content="#6366f1">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>
+html,body{margin:0;padding:0;background:#f1f5f9;-webkit-tap-highlight-color:transparent}*{box-sizing:border-box}
+@keyframes fadeUp{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.7/babel.min.js"></script>
+<script src="https://unpkg.com/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const {useState,useEffect,useRef}=React;
+
+// ══════════════════════════════════════════════════════════════════
+// 클라우드 동기화 계층 (Apps Script 백엔드) — Google 계정 로그인(세션 토큰) 기반
+// 과거 공유 비밀 토큰(APP_SECRET) 방식은 GitHub Pages가 Public이라 페이지 소스에 그대로
+// 노출되는 구조적 한계가 있어 폐기 — household_ledger와 동일한 클라이언트 ID·메커니즘 재사용.
+// ══════════════════════════════════════════════════════════════════
+
+const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw7JLmbKqOmxzeysBpy-8IdZ3xyTliQzHZ7QqgkUcvABKSLCy80rj2F3XNRMpdqqUX3_A/exec";
+const GOOGLE_CLIENT_ID = "457529892194-utbnqihap22pf00a4t71tq27e6gedp92.apps.googleusercontent.com";
+const SYNC_INTERVAL_MS = 30000; // 30초 폴링 — 노트북↔모바일 양방향 반영
+const SESSION_STORAGE_KEY = "taskboard_session_token";
+
+const getSessionToken=()=>localStorage.getItem(SESSION_STORAGE_KEY);
+const setSessionToken=(t)=>{ if(t) localStorage.setItem(SESSION_STORAGE_KEY,t); else localStorage.removeItem(SESSION_STORAGE_KEY); };
+
+async function cloudGetAll(){
+  const token=getSessionToken();
+  const res = await fetch(`${APPS_SCRIPT_URL}?t=${Date.now()}&token=${encodeURIComponent(token||"")}`);
+  if(!res.ok) throw new Error("cloud fetch failed: "+res.status);
+  const data = await res.json();
+  if(data.ok===false) throw new Error(data.error||"unauthorized");
+  return data;
+}
+async function cloudPost(payload){
+  // Content-Type text/plain 사유: Apps Script는 CORS preflight(OPTIONS)를 처리하지
+  // 않으므로 simple request로 보내야 브라우저가 막지 않는다.
+  const token=getSessionToken();
+  const res = await fetch(APPS_SCRIPT_URL,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({...payload,token})});
+  if(!res.ok) throw new Error("cloud post failed: "+res.status);
+  return await res.json();
+}
+async function cloudSet(key,value){
+  const data=await cloudPost({action:"set",key,value});
+  if(!data.ok) throw new Error(data.error||"저장 실패");
+  return data;
+}
+const notionSearch=()=>cloudPost({action:"notionSearch"});
+const notionUpsert=(pageId,databaseId,properties)=>cloudPost({action:"notionUpsert",pageId,databaseId,properties});
+const notionStatusReq=()=>cloudPost({action:"notionStatus"});
+const setNotionTokenReq=(token)=>cloudPost({action:"setNotionToken",token});
+const gcalSyncReq=(tasks)=>cloudPost({action:"gcalSync",tasks});
+const googleLoginReq=(idToken)=>cloudPost({action:"googleLogin",idToken});
+const logoutReq=()=>cloudPost({action:"logout"});
+
+// ══════════════════════════════════════════════════════════════════
+// 상수·헬퍼
+// ══════════════════════════════════════════════════════════════════
+
+const COLORS=["#6366f1","#f59e0b","#10b981","#ef4444","#3b82f6","#ec4899","#8b5cf6","#14b8a6"];
+const STATUS_OPTS=['우선순위 1','우선순위 2','추후업무','분류대기'];
+const SC={'우선순위 1':'#ef4444','우선순위 2':'#f59e0b','추후업무':'#6366f1','분류대기':'#94a3b8'};
+const CAT_OPTS=['WORK','LIFE'];
+const CC={'WORK':'#3b82f6','LIFE':'#10b981'};
+const CAT_DARK={'WORK':'#1d4ed8','LIFE':'#047857'};
+const ALERT_DAYS=[7,5,2,1,0];
+const uid=()=>Math.random().toString(36).slice(2,9);
+const toDay=()=>new Date().toISOString().slice(0,10);
+const daysLeft=d=>d?Math.ceil((new Date(d.split('T')[0])-new Date(toDay()))/86400000):null;
+const fmtD=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+const fmtDT=d=>{const t=new Date(d);return`${fmtD(t)} ${String(t.getHours()).padStart(2,"0")}:${String(t.getMinutes()).padStart(2,"0")}`;};
+const fmtDTLoc=s=>{if(!s)return"";const p=s.split('T');return p[0]+(p[1]?` ${p[1]}`:"");};
+const WD=["일","월","화","수","목","금","토"];
+const seoulNow=()=>new Date(new Date().toLocaleString("en-US",{timeZone:"Asia/Seoul"}));
+
+// 사용자 Notion 원본 DB 사전 연결값 (To do list 페이지 내 모든 보기의 원본 = "todolist 2")
+const NOTION_DB_ID="5b778357-28ec-83ef-abee-012534eb69c9";
+const NOTION_DB_NAME="todolist 2 (To do list)";
+// "category" 속성은 Select가 아니라 category 2 DB로의 관계(relation) — 페이지 ID로 매핑
+const NOTION_REL={WORK:"b7e78357-28ec-838f-87e8-011fd1b6e93f",LIFE:"a6278357-28ec-828e-9ece-01d111305cab"};
+const DEF_NCFG={dbId:NOTION_DB_ID,dbName:NOTION_DB_NAME};
+
+const RECURRENCE_OPTS=['반복 없음','매일','매주','격주','매월','매년'];
+const RECURRENCE_MAP={'반복 없음':'none','매일':'daily','매주':'weekly','격주':'biweekly','매월':'monthly','매년':'yearly'};
+const RECURRENCE_KEY={none:'반복 없음',daily:'매일',weekly:'매주',biweekly:'격주',monthly:'매월',yearly:'매년'};
+
+const DEF_WIDGETS={gauge:true,kpi:true,proj:true,list:true,week:true};
+const DEF_PROJ=[{id:"p1",name:"웹 리뉴얼",color:"#6366f1",category:"WORK",deadline:"",details:[{org:"디자인팀",amount:"5,000,000",note:"UI/UX 개선"}]},{id:"p2",name:"마케팅 캠페인",color:"#f59e0b",category:"WORK",deadline:"",details:[{org:"마케팅팀",amount:"3,000,000",note:"SNS 위주"}]}];
+const DEF_TASKS=[{id:"t1",pid:"p1",title:"메인 페이지 디자인",status:"우선순위 1",category:"WORK",start:"2026-06-01",due:"2026-06-07",done:false,recurrence:"none",recurrencePattern:{},recurrenceEndDate:"",created:Date.now()-4000},{id:"t2",pid:"p1",title:"API 연동",status:"우선순위 2",category:"WORK",start:"",due:"2026-06-10",done:false,recurrence:"none",recurrencePattern:{},recurrenceEndDate:"",created:Date.now()-3000},{id:"t3",pid:"p1",title:"QA 테스트",status:"추후업무",category:"WORK",start:"",due:"2026-06-15",done:true,recurrence:"none",recurrencePattern:{},recurrenceEndDate:"",created:Date.now()-2000},{id:"t4",pid:"p2",title:"SNS 콘텐츠 기획",status:"우선순위 1",category:"WORK",start:"2026-06-03",due:"2026-06-06",done:false,recurrence:"none",recurrencePattern:{},recurrenceEndDate:"",created:Date.now()-1000},{id:"t5",pid:"p2",title:"광고 소재 제작",status:"분류대기",category:"LIFE",start:"",due:"2026-06-12",done:false,recurrence:"none",recurrencePattern:{},recurrenceEndDate:"",created:Date.now()-100}];
+
+// ══════════════════════════════════════════════════════════════════
+// 공용 소품 컴포넌트
+// ══════════════════════════════════════════════════════════════════
+
+// 서울 기준 아날로그 시계 — 상단 배너 상시 표시
+function AnalogClock(){
+  const [t,setT]=useState(seoulNow());
+  useEffect(()=>{const iv=setInterval(()=>setT(seoulNow()),1000);return()=>clearInterval(iv);},[]);
+  const sec=t.getSeconds(),min=t.getMinutes()+sec/60,hr=(t.getHours()%12)+min/60;
+  const C=23,hand=(ang,len,w,color,cap)=>{const a=(ang-90)*Math.PI/180;return <line x1={C-Math.cos(a)*len*0.25} y1={C-Math.sin(a)*len*0.25} x2={C+Math.cos(a)*len} y2={C+Math.sin(a)*len} stroke={color} strokeWidth={w} strokeLinecap={cap||"round"}/>;};
+  const ticks=[];for(let i=0;i<12;i++){const a=i*30*Math.PI/180,maj=i%3===0;ticks.push(<line key={i} x1={C+Math.sin(a)*(maj?16.5:18)} y1={C-Math.cos(a)*(maj?16.5:18)} x2={C+Math.sin(a)*20} y2={C-Math.cos(a)*20} stroke={maj?"#64748b":"#cbd5e1"} strokeWidth={maj?1.8:1} strokeLinecap="round"/>);}
+  const hh=String(t.getHours()).padStart(2,"0"),mm=String(t.getMinutes()).padStart(2,"0");
+  return(<div style={{display:"flex",alignItems:"center",gap:9,userSelect:"none"}} title="서울 표준시">
+    <svg width="46" height="46" viewBox="0 0 46 46">
+      <defs><radialGradient id="cface" cx="35%" cy="30%"><stop offset="0%" stopColor="#ffffff"/><stop offset="100%" stopColor="#eef2ff"/></radialGradient></defs>
+      <circle cx={C} cy={C} r="22" fill="url(#cface)" stroke="#c7d2fe" strokeWidth="1.6"/>
+      {ticks}
+      {hand(hr*30,10.5,2.6,"#1e293b")}
+      {hand(min*6,15,1.9,"#334155")}
+      {hand(sec*6,17,1,"#6366f1","butt")}
+      <circle cx={C} cy={C} r="2" fill="#6366f1"/>
+    </svg>
+    <div className="clock-digits" style={{lineHeight:1.15}}>
+      <div style={{fontSize:15,fontWeight:700,color:"#1e293b",fontVariantNumeric:"tabular-nums"}}>{hh}:{mm}</div>
+      <div style={{fontSize:10,color:"#94a3b8"}}>{t.getMonth()+1}월 {t.getDate()}일 ({WD[t.getDay()]}) · 서울</div>
+    </div>
+  </div>);
+}
+
+// 도넛 진행 게이지 — 체크박스 토글 시 stroke-dashoffset 트랜지션으로 차오름
+function Donut({pct,color,size=118,stroke=13,sub}){
+  const r=(size-stroke)/2,c=2*Math.PI*r;
+  return(<div style={{position:"relative",width:size,height:size,flexShrink:0}}>
+    <svg width={size} height={size}>
+      <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="#e2e8f0" strokeWidth={stroke}/>
+      <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={color} strokeWidth={stroke} strokeLinecap="round"
+        strokeDasharray={c} strokeDashoffset={c*(1-Math.min(pct,100)/100)}
+        transform={`rotate(-90 ${size/2} ${size/2})`}
+        style={{transition:"stroke-dashoffset .7s cubic-bezier(.22,1,.36,1)"}}/>
+    </svg>
+    <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center"}}>
+      <span style={{fontSize:size*0.22,fontWeight:800,color:"#1e293b",fontVariantNumeric:"tabular-nums"}}>{pct}%</span>
+      {sub&&<span style={{fontSize:10.5,color:"#94a3b8",marginTop:1}}>{sub}</span>}
+    </div>
+  </div>);
+}
+
+// 진행 바 — width 트랜지션
+function GaugeBar({pct,color,h=6}){
+  return(<div style={{height:h,background:"#e2e8f0",borderRadius:h,overflow:"hidden"}}>
+    <div style={{height:"100%",width:pct+"%",background:color,borderRadius:h,transition:"width .6s cubic-bezier(.22,1,.36,1)"}}/>
+  </div>);
+}
+
+// 완료 체크박스 (모든 뷰 공통 — 토글하면 게이지가 실시간으로 차오른다)
+function DoneBox({done,onToggle,size=17}){
+  return(<div onClick={onToggle} style={{width:size,height:size,borderRadius:5,border:`2px solid ${done?"#6366f1":"#cbd5e1"}`,background:done?"#6366f1":"transparent",display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",flexShrink:0,transition:"background .18s,border-color .18s"}}>
+    {done&&<svg width="9" height="9" viewBox="0 0 9 9"><path d="M1 4.5L3.5 7L8 2" stroke="#fff" strokeWidth="1.7" fill="none" strokeLinecap="round"/></svg>}
+  </div>);
+}
+
+function ProjInfoPanel({project,onUpdate}){
+  const [open,setOpen]=useState(false);
+  const isWork=project.category==="WORK"||!project.category;
+  const [rows,setRows]=useState(isWork?project.details||[]:null);
+  const [notes,setNotes]=useState(!isWork?project.notes||"":null);
+  useEffect(()=>{if(isWork)setRows(project.details||[]);else setNotes(project.notes||"");},[project.id,isWork]);
+  const si={padding:"6px 8px",border:"1px solid #e2e8f0",borderRadius:6,fontSize:12,outline:"none",width:"100%",boxSizing:"border-box"};
+  return(<div style={{background:"#fff",borderBottom:"1px solid #e2e8f0"}}>
+    <div onClick={()=>setOpen(o=>!o)} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 22px",cursor:"pointer",userSelect:"none"}}>
+      <span style={{fontSize:12,fontWeight:600,color:"#1e293b",display:"flex",alignItems:"center",gap:6}}><span style={{width:8,height:8,borderRadius:"50%",background:project.color,display:"inline-block"}}/>프로젝트 상세정보</span>
+      <span style={{fontSize:11,color:"#94a3b8"}}>{open?"▲ 닫기":"▼ 펼치기"}</span>
+    </div>
+    {open&&<div style={{padding:"2px 22px 13px"}}>
+      {isWork?<>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+          <span style={{fontSize:11,color:"#94a3b8"}}>관련기관 / 금액 / 수행사 / 특이사항</span>
+          <div style={{display:"flex",gap:6}}>
+            <button onClick={()=>setRows(r=>[...r,{org:"",amount:"",executor:"",note:""}])} style={{padding:"4px 10px",borderRadius:6,background:"#f1f5f9",color:"#475569",border:"none",fontSize:11,cursor:"pointer",fontWeight:600}}>＋ 항목</button>
+            <button onClick={()=>onUpdate(rows,"details")} style={{padding:"4px 10px",borderRadius:6,background:"#6366f1",color:"#fff",border:"none",fontSize:11,cursor:"pointer",fontWeight:600}}>저장</button>
+          </div>
+        </div>
+        {rows.length===0&&<div style={{fontSize:12,color:"#cbd5e1"}}>항목 없음</div>}
+        {rows.map((d,i)=>(<div key={i} style={{display:"flex",gap:4,marginBottom:6,alignItems:"center"}}>
+          <input style={{...si,flex:0.8}} placeholder="기관" value={d.org} onChange={e=>setRows(r=>r.map((x,j)=>j===i?{...x,org:e.target.value}:x))}/>
+          <input style={{...si,flex:0.8}} placeholder="금액" value={d.amount} onChange={e=>setRows(r=>r.map((x,j)=>j===i?{...x,amount:e.target.value}:x))}/>
+          <input style={{...si,flex:0.8}} placeholder="수행사" value={d.executor||""} onChange={e=>setRows(r=>r.map((x,j)=>j===i?{...x,executor:e.target.value}:x))}/>
+          <input style={{...si,flex:1}} placeholder="특이사항" value={d.note} onChange={e=>setRows(r=>r.map((x,j)=>j===i?{...x,note:e.target.value}:x))}/>
+          <span onClick={()=>setRows(r=>r.filter((_,j)=>j!==i))} style={{cursor:"pointer",color:"#cbd5e1",fontSize:13,flexShrink:0}}>✕</span>
+        </div>))}</>:<>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+          <span style={{fontSize:11,color:"#94a3b8"}}>비고</span>
+          <button onClick={()=>onUpdate(notes,"notes")} style={{padding:"4px 10px",borderRadius:6,background:"#6366f1",color:"#fff",border:"none",fontSize:11,cursor:"pointer",fontWeight:600}}>저장</button>
+        </div>
+        <textarea style={{...si,minHeight:60,resize:"vertical",fontFamily:"inherit"}} placeholder="비고" value={notes} onChange={e=>setNotes(e.target.value)}/></>}
+    </div>}
+  </div>);
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 대시보드 뷰 — WORK·LIFE 동시 표시 (색·섹션 구분, 창 전환 없음)
+// ══════════════════════════════════════════════════════════════════
+
+function SectionPanel({cat,tasks,projects,PM,onToggle,widgets}){
+  const color=CC[cat],dark=CAT_DARK[cat],tint=cat==="WORK"?"#eff6ff":"#ecfdf5",border=cat==="WORK"?"#bfdbfe":"#a7f3d0";
+  const ts=tasks.filter(t=>(t.category||"WORK")===cat);
+  const total=ts.length,done=ts.filter(t=>t.done).length,pct=total?Math.round(done/total*100):0;
+  const open=ts.filter(t=>!t.done);
+  const today=open.filter(t=>t.due===toDay()).length;
+  const urgent=open.filter(t=>t.due&&daysLeft(t.due)>=0&&daysLeft(t.due)<=7).length;
+  const overdue=open.filter(t=>t.due&&daysLeft(t.due)<0).length;
+  const projRows=projects.map(p=>{const pts=ts.filter(t=>t.pid===p.id);if(!pts.length)return null;const pd=pts.filter(t=>t.done).length;return{p,total:pts.length,done:pd,pct:Math.round(pd/pts.length*100)};}).filter(Boolean);
+  const upList=[...open].sort((a,b)=>(a.due||"9999")>(b.due||"9999")?1:-1).slice(0,6);
+  const kpi=[{l:"진행중",n:open.length,c:"#475569"},{l:"오늘 마감",n:today,c:today?"#ef4444":"#94a3b8"},{l:"임박(7일)",n:urgent,c:urgent?"#f59e0b":"#94a3b8"},{l:"기한초과",n:overdue,c:overdue?"#ef4444":"#94a3b8"}];
+  const dLbl=due=>{const dl=daysLeft(due);if(dl===null)return"";if(dl<0)return`${Math.abs(dl)}일 초과`;if(dl===0)return"오늘";if(dl===1)return"내일";return`${dl}일 후`;};
+  return(<div style={{background:"#fff",borderRadius:16,border:`1.5px solid ${border}`,boxShadow:"0 2px 10px rgba(0,0,0,.06)",overflow:"hidden",animation:"fadeUp .3s ease"}}>
+    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 18px",background:tint,borderBottom:`1px solid ${border}`}}>
+      <span style={{display:"flex",alignItems:"center",gap:8,fontWeight:800,fontSize:14,color:dark}}>
+        <span style={{width:10,height:10,borderRadius:"50%",background:color,display:"inline-block"}}/>
+        {cat==="WORK"?"WORK · 업무":"LIFE · 일상"}
+      </span>
+      <span style={{fontSize:12,color:dark,fontWeight:600}}>{done}/{total} 완료</span>
+    </div>
+    <div style={{padding:"16px 18px",display:"flex",flexDirection:"column",gap:16}}>
+      {(widgets.gauge||widgets.kpi)&&<div style={{display:"flex",alignItems:"center",gap:18,flexWrap:"wrap"}}>
+        {widgets.gauge&&<Donut pct={pct} color={color} sub={`${done}/${total}`}/>}
+        {widgets.kpi&&<div style={{flex:1,minWidth:180,display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+          {kpi.map(x=>(<div key={x.l} style={{background:"#f8fafc",borderRadius:10,padding:"9px 12px",borderLeft:`3px solid ${x.c}`}}>
+            <div style={{fontSize:19,fontWeight:800,color:x.c,fontVariantNumeric:"tabular-nums"}}>{x.n}</div>
+            <div style={{fontSize:10,color:"#94a3b8",marginTop:1}}>{x.l}</div>
+          </div>))}
+        </div>}
+      </div>}
+      {widgets.proj&&projRows.length>0&&<div>
+        <div style={{fontSize:11,fontWeight:700,color:"#94a3b8",marginBottom:8}}>프로젝트 진행률</div>
+        {projRows.map(r=>(<div key={r.p.id} style={{marginBottom:9}}>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
+            <span style={{fontSize:12.5,fontWeight:600,color:"#1e293b",display:"flex",alignItems:"center",gap:5}}><span style={{width:7,height:7,borderRadius:"50%",background:r.p.color,display:"inline-block"}}/>{r.p.name}
+              {r.p.deadline&&(()=>{const dl=daysLeft(r.p.deadline);return<span style={{fontSize:10,fontWeight:700,color:dl<0?"#ef4444":dl<=7?"#f59e0b":"#94a3b8"}}>{dl<0?`기한 ${Math.abs(dl)}일 초과`:dl===0?"기한 오늘":`D-${dl}`}</span>;})()}
+            </span>
+            <span style={{fontSize:11,color:"#94a3b8",fontVariantNumeric:"tabular-nums"}}>{r.done}/{r.total} · {r.pct}%</span>
+          </div>
+          <GaugeBar pct={r.pct} color={r.p.color}/>
+        </div>))}
+      </div>}
+      {widgets.list&&<div>
+        <div style={{fontSize:11,fontWeight:700,color:"#94a3b8",marginBottom:6}}>할 일 (마감 임박순 — 체크하면 게이지가 채워집니다)</div>
+        {upList.length===0&&<div style={{fontSize:12.5,color:"#cbd5e1",padding:"6px 0"}}>남은 할 일이 없습니다 🎉</div>}
+        {upList.map(t=>{const dl=daysLeft(t.due);return(
+          <div key={t.id} style={{display:"flex",alignItems:"center",gap:9,padding:"6px 2px",borderBottom:"1px solid #f1f5f9"}}>
+            <DoneBox done={t.done} onToggle={()=>onToggle(t.id)} size={16}/>
+            <span style={{width:6,height:6,borderRadius:"50%",background:PM[t.pid]?.color||"#cbd5e1",flexShrink:0}}/>
+            <span style={{fontSize:12.5,color:"#1e293b",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.title}</span>
+            {t.due&&<span style={{fontSize:10.5,fontWeight:600,color:dl<0||dl===0?"#ef4444":dl<=5?"#f59e0b":"#94a3b8",flexShrink:0}}>{dLbl(t.due)}</span>}
+          </div>);})}
+      </div>}
+    </div>
+  </div>);
+}
+
+// 다가오는 7일 마감 분포 — WORK/LIFE 스택 막대 (2px 간격, 직접 라벨)
+function WeekChart({tasks}){
+  const days=[];for(let i=0;i<7;i++){const d=new Date();d.setDate(d.getDate()+i);days.push(fmtD(d));}
+  const data=days.map(ds=>{const dt=tasks.filter(t=>!t.done&&t.due===ds);return{ds,w:dt.filter(t=>(t.category||"WORK")==="WORK").length,l:dt.filter(t=>t.category==="LIFE").length};});
+  const max=Math.max(1,...data.map(d=>d.w+d.l));
+  const H=72;
+  return(<div style={{background:"#fff",borderRadius:16,border:"1.5px solid #e2e8f0",boxShadow:"0 2px 10px rgba(0,0,0,.06)",padding:"14px 18px",animation:"fadeUp .3s ease"}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+      <span style={{fontSize:12,fontWeight:700,color:"#1e293b"}}>다가오는 7일 마감 분포</span>
+      <span style={{display:"flex",gap:12,fontSize:10.5,color:"#64748b"}}>
+        <span style={{display:"flex",alignItems:"center",gap:4}}><span style={{width:8,height:8,borderRadius:2,background:CC.WORK,display:"inline-block"}}/>WORK</span>
+        <span style={{display:"flex",alignItems:"center",gap:4}}><span style={{width:8,height:8,borderRadius:2,background:CC.LIFE,display:"inline-block"}}/>LIFE</span>
+      </span>
+    </div>
+    {data.every(d=>d.w+d.l===0)?<div style={{fontSize:12.5,color:"#cbd5e1",padding:"8px 0"}}>다가오는 7일 내 마감 예정이 없습니다</div>:
+    <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
+      {data.map((d,i)=>{const tot=d.w+d.l,dt=new Date(d.ds+"T00:00:00");return(
+        <div key={d.ds} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
+          <span style={{fontSize:10.5,fontWeight:700,color:tot?"#334155":"#e2e8f0",fontVariantNumeric:"tabular-nums"}}>{tot||""}</span>
+          <div style={{width:"100%",maxWidth:34,height:H,display:"flex",flexDirection:"column",justifyContent:"flex-end",gap:2}}>
+            {d.l>0&&<div style={{height:Math.max(6,d.l/max*H),background:CC.LIFE,borderRadius:"4px 4px 2px 2px",transition:"height .5s ease"}}/>}
+            {d.w>0&&<div style={{height:Math.max(6,d.w/max*H),background:CC.WORK,borderRadius:d.l>0?"2px":"4px 4px 2px 2px",transition:"height .5s ease"}}/>}
+          </div>
+          <span style={{fontSize:10,fontWeight:i===0?800:500,color:i===0?"#6366f1":dt.getDay()===0?"#f87171":dt.getDay()===6?"#60a5fa":"#94a3b8"}}>{i===0?"오늘":`${dt.getDate()}(${WD[dt.getDay()]})`}</span>
+        </div>);})}
+    </div>}
+  </div>);
+}
+
+function DashboardView({tasks,projects,PM,onToggle,widgets,setWidgets}){
+  const [showCfg,setShowCfg]=useState(false);
+  const WKEYS=[["gauge","진행 게이지(도넛)"],["kpi","상태 요약(KPI)"],["proj","프로젝트 진행률"],["list","할 일 목록"],["week","7일 마감 분포"]];
+  return(<div style={{flex:1,overflowY:"auto",padding:"18px 20px"}}>
+    <div style={{maxWidth:1060,margin:"0 auto"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+        <div>
+          <div style={{fontWeight:800,fontSize:16,color:"#1e293b"}}>오늘 한눈에</div>
+          <div style={{fontSize:11.5,color:"#94a3b8",marginTop:2}}>업무(WORK)와 일상(LIFE)을 한 화면에서 — 체크하면 게이지가 바로 반응합니다</div>
+        </div>
+        <div style={{position:"relative"}}>
+          <button onClick={()=>setShowCfg(v=>!v)} style={{padding:"7px 12px",borderRadius:9,border:"1px solid #e2e8f0",background:"#fff",color:"#475569",fontSize:12,fontWeight:600,cursor:"pointer"}}>⚙ 위젯 설정</button>
+          {showCfg&&<div style={{position:"absolute",right:0,top:"110%",zIndex:120,background:"#fff",border:"1px solid #e2e8f0",borderRadius:12,boxShadow:"0 8px 24px rgba(0,0,0,.14)",padding:"12px 14px",width:200}}>
+            <div style={{fontSize:11,fontWeight:700,color:"#94a3b8",marginBottom:8}}>표시할 위젯 선택</div>
+            {WKEYS.map(([k,l])=>(<label key={k} style={{display:"flex",alignItems:"center",gap:8,padding:"4px 0",fontSize:12.5,color:"#1e293b",cursor:"pointer"}}>
+              <input type="checkbox" checked={!!widgets[k]} onChange={()=>setWidgets({...widgets,[k]:!widgets[k]})} style={{accentColor:"#6366f1"}}/>{l}
+            </label>))}
+            <div style={{fontSize:10,color:"#cbd5e1",marginTop:6}}>설정은 기기 간 자동 동기화됩니다</div>
+          </div>}
+        </div>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(330px,1fr))",gap:14,marginBottom:14}}>
+        <SectionPanel cat="WORK" tasks={tasks} projects={projects} PM={PM} onToggle={onToggle} widgets={widgets}/>
+        <SectionPanel cat="LIFE" tasks={tasks} projects={projects} PM={PM} onToggle={onToggle} widgets={widgets}/>
+      </div>
+      {widgets.week&&<WeekChart tasks={tasks}/>}
+    </div>
+  </div>);
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 캘린더 뷰 — 월 그리드에 일정이 항상 보이는 스팬 바 (구글 캘린더 방식)
+// ══════════════════════════════════════════════════════════════════
+
+function monthWeeks(y,m){
+  const last=new Date(y,m+1,0);
+  const cur=new Date(y,m,1);cur.setDate(cur.getDate()-cur.getDay());
+  const weeks=[];
+  do{const w=[];for(let i=0;i<7;i++){w.push(new Date(cur));cur.setDate(cur.getDate()+1);}weeks.push(w);}while(cur<=last);
+  return weeks;
+}
+
+function CalendarView({tasks,projects,PM,onToggle,onDelete,onQuickAdd,onGcal,gcalBusy}){
+  const now=seoulNow();
+  const [ym,setYm]=useState({y:now.getFullYear(),m:now.getMonth()});
+  const [selDay,setSelDay]=useState(null);
+  const weeks=monthWeeks(ym.y,ym.m);
+  const today=toDay();
+  const MAXLANE=3,BAR_H=19,DATE_H=26;
+  const spanOf=t=>{if(!t.due)return null;const s=t.start&&t.start<=t.due?t.start:t.due;return{s,e:t.due};};
+  const move=n=>{const d=new Date(ym.y,ym.m+n,1);setYm({y:d.getFullYear(),m:d.getMonth()});setSelDay(null);};
+  const dayTasks=ds=>tasks.filter(t=>{const sp=spanOf(t);return sp&&sp.s<=ds&&ds<=sp.e;});
+  return(<div style={{flex:1,overflowY:"auto",padding:"18px 20px"}}>
+    <div style={{maxWidth:1060,margin:"0 auto"}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:10,marginBottom:14}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <button onClick={()=>move(-1)} style={{width:30,height:30,borderRadius:8,border:"1px solid #e2e8f0",background:"#fff",cursor:"pointer",fontSize:13,color:"#475569"}}>◀</button>
+          <span style={{fontWeight:800,fontSize:17,color:"#1e293b",minWidth:120,textAlign:"center"}}>{ym.y}년 {ym.m+1}월</span>
+          <button onClick={()=>move(1)} style={{width:30,height:30,borderRadius:8,border:"1px solid #e2e8f0",background:"#fff",cursor:"pointer",fontSize:13,color:"#475569"}}>▶</button>
+          <button onClick={()=>{const n=seoulNow();setYm({y:n.getFullYear(),m:n.getMonth()});}} style={{padding:"6px 12px",borderRadius:8,border:"1px solid #c7d2fe",background:"#eef2ff",color:"#6366f1",fontSize:12,fontWeight:700,cursor:"pointer"}}>오늘</button>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:12}}>
+          <span style={{display:"flex",gap:10,fontSize:10.5,color:"#64748b"}}>
+            <span style={{display:"flex",alignItems:"center",gap:4}}><span style={{width:8,height:8,borderRadius:2,background:CC.WORK,display:"inline-block"}}/>WORK</span>
+            <span style={{display:"flex",alignItems:"center",gap:4}}><span style={{width:8,height:8,borderRadius:2,background:CC.LIFE,display:"inline-block"}}/>LIFE</span>
+          </span>
+          <button onClick={onGcal} disabled={gcalBusy} style={{padding:"7px 13px",borderRadius:9,border:"none",background:gcalBusy?"#f1f5f9":"#0f9d58",color:gcalBusy?"#94a3b8":"#fff",fontSize:12,fontWeight:700,cursor:gcalBusy?"wait":"pointer"}}>{gcalBusy?"⏳ 동기화 중...":"📆 구글 캘린더로 보내기"}</button>
+        </div>
+      </div>
+      <div style={{overflowX:"auto"}}>
+        <div style={{minWidth:660,background:"#fff",borderRadius:16,border:"1.5px solid #e2e8f0",boxShadow:"0 2px 10px rgba(0,0,0,.06)",overflow:"hidden"}}>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",borderBottom:"1px solid #e2e8f0",background:"#f8fafc"}}>
+            {WD.map((w,i)=>(<div key={w} style={{padding:"8px 0",textAlign:"center",fontSize:11.5,fontWeight:700,color:i===0?"#f87171":i===6?"#60a5fa":"#64748b"}}>{w}</div>))}
+          </div>
+          {weeks.map((week,wi)=>{
+            const ws=fmtD(week[0]),we=fmtD(week[6]);
+            const segs=[];
+            tasks.forEach(t=>{const sp=spanOf(t);if(!sp||sp.e<ws||sp.s>we)return;
+              const sIdx=sp.s<=ws?0:week.findIndex(d=>fmtD(d)===sp.s);
+              const eIdx=sp.e>=we?6:week.findIndex(d=>fmtD(d)===sp.e);
+              if(sIdx<0||eIdx<0)return;
+              segs.push({t,sIdx,eIdx,capL:sp.s>=ws,capR:sp.e<=we});});
+            segs.sort((a,b)=>a.sIdx-b.sIdx||(b.eIdx-b.sIdx)-(a.eIdx-a.sIdx));
+            const laneEnd=[];segs.forEach(sg=>{let L=0;while(laneEnd[L]!==undefined&&laneEnd[L]>=sg.sIdx)L++;laneEnd[L]=sg.eIdx;sg.lane=L;});
+            const visLanes=Math.min(Math.max(0,...segs.map(s=>s.lane+1),0),MAXLANE);
+            const overflowByDay=week.map((d,di)=>segs.filter(s=>s.lane>=MAXLANE&&s.sIdx<=di&&di<=s.eIdx).length);
+            const rowH=DATE_H+visLanes*(BAR_H+3)+(overflowByDay.some(n=>n>0)?16:6);
+            return(<div key={wi} style={{position:"relative",height:rowH,borderBottom:wi<weeks.length-1?"1px solid #eef2f7":"none"}}>
+              <div style={{position:"absolute",inset:0,display:"grid",gridTemplateColumns:"repeat(7,1fr)"}}>
+                {week.map((d,di)=>{const ds=fmtD(d),inM=d.getMonth()===ym.m,isT=ds===today;
+                  return(<div key={di} onClick={()=>setSelDay(ds)} style={{borderRight:di<6?"1px solid #eef2f7":"none",cursor:"pointer",background:isT?"#eef2ff":inM?"transparent":"#fafbfd",position:"relative"}}>
+                    <div style={{position:"absolute",top:4,left:6,width:20,height:20,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11.5,fontWeight:isT?800:600,background:isT?"#6366f1":"transparent",color:isT?"#fff":!inM?"#cbd5e1":d.getDay()===0?"#f87171":d.getDay()===6?"#60a5fa":"#475569"}}>{d.getDate()}</div>
+                    {overflowByDay[di]>0&&<div style={{position:"absolute",bottom:2,left:6,fontSize:9.5,fontWeight:700,color:"#94a3b8"}}>+{overflowByDay[di]}</div>}
+                  </div>);})}
+              </div>
+              {segs.filter(s=>s.lane<MAXLANE).map((sg,si)=>{const c=PM[sg.t.pid]?.color||CC[sg.t.category]||"#94a3b8";
+                return(<div key={si} onClick={()=>setSelDay(sg.t.due)} title={sg.t.title}
+                  style={{position:"absolute",top:DATE_H+sg.lane*(BAR_H+3),left:`calc(${sg.sIdx/7*100}% + 3px)`,width:`calc(${(sg.eIdx-sg.sIdx+1)/7*100}% - 6px)`,height:BAR_H,
+                    background:sg.t.done?"#e2e8f0":c,color:sg.t.done?"#94a3b8":"#fff",
+                    borderRadius:`${sg.capL?9:2}px ${sg.capR?9:2}px ${sg.capR?9:2}px ${sg.capL?9:2}px`,
+                    fontSize:10.5,fontWeight:700,lineHeight:`${BAR_H}px`,padding:"0 7px",overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis",cursor:"pointer",
+                    textDecoration:sg.t.done?"line-through":"none",boxShadow:sg.t.done?"none":"0 1px 2px rgba(0,0,0,.14)",border:"1px solid rgba(255,255,255,.55)"}}>
+                  {(sg.t.category==="LIFE"?"🟢 ":"")+sg.t.title}
+                </div>);})}
+            </div>);})}
+        </div>
+      </div>
+      <div style={{fontSize:10.5,color:"#94a3b8",marginTop:8}}>· 막대는 시작일~마감일 기간입니다. 날짜 칸을 클릭하면 상세 확인·바로 추가할 수 있습니다.</div>
+    </div>
+    {selDay&&<DayPanel ds={selDay} tasks={dayTasks(selDay)} projects={projects} PM={PM} onClose={()=>setSelDay(null)} onToggle={onToggle} onDelete={onDelete} onQuickAdd={onQuickAdd}/>}
+  </div>);
+}
+
+function DayPanel({ds,tasks,projects,PM,onClose,onToggle,onDelete,onQuickAdd}){
+  const [title,setTitle]=useState("");
+  const [pid,setPid]=useState(projects[0]?.id||"");
+  const [cat,setCat]=useState("WORK");
+  const d=new Date(ds+"T00:00:00");
+  const inp={padding:"8px 10px",border:"1px solid #e2e8f0",borderRadius:7,fontSize:13,outline:"none",boxSizing:"border-box"};
+  const add=()=>{if(!title.trim()||!pid)return;onQuickAdd({title:title.trim(),pid,category:cat,due:ds});setTitle("");};
+  return(<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200}} onClick={onClose}>
+    <div style={{background:"#fff",borderRadius:14,padding:22,width:430,maxHeight:"85vh",overflowY:"auto",boxShadow:"0 8px 32px rgba(0,0,0,.2)"}} onClick={e=>e.stopPropagation()}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+        <span style={{fontWeight:800,fontSize:15,color:"#1e293b"}}>📅 {d.getMonth()+1}월 {d.getDate()}일 ({WD[d.getDay()]})</span>
+        <span onClick={onClose} style={{cursor:"pointer",color:"#94a3b8",fontSize:15}}>✕</span>
+      </div>
+      {tasks.length===0&&<div style={{fontSize:13,color:"#cbd5e1",padding:"6px 0 12px"}}>이 날짜의 일정이 없습니다</div>}
+      {tasks.map(t=>(<div key={t.id} style={{display:"flex",alignItems:"center",gap:9,padding:"8px 2px",borderBottom:"1px solid #f1f5f9"}}>
+        <DoneBox done={t.done} onToggle={()=>onToggle(t.id)} size={16}/>
+        <span style={{width:7,height:7,borderRadius:"50%",background:PM[t.pid]?.color||"#cbd5e1",flexShrink:0}}/>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontSize:13,color:t.done?"#94a3b8":"#1e293b",textDecoration:t.done?"line-through":"none",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.title}</div>
+          <div style={{fontSize:10.5,color:"#94a3b8"}}>{PM[t.pid]?.name} {t.start&&t.start!==t.due?`· ${t.start} ~ ${t.due}`:""}</div>
+        </div>
+        <span style={{fontSize:9.5,padding:"2px 7px",borderRadius:10,background:(CC[t.category]||"#94a3b8")+"18",color:CC[t.category]||"#94a3b8",fontWeight:700,flexShrink:0}}>{t.category||"-"}</span>
+        <span style={{fontSize:9.5,padding:"2px 7px",borderRadius:10,background:(SC[t.status]||"#94a3b8")+"18",color:SC[t.status]||"#94a3b8",fontWeight:600,flexShrink:0}}>{t.status||"-"}</span>
+        <span onClick={()=>onDelete(t.id)} style={{fontSize:12,color:"#cbd5e1",cursor:"pointer",flexShrink:0}}>✕</span>
+      </div>))}
+      <div style={{marginTop:14,background:"#f8fafc",borderRadius:10,padding:"11px 12px"}}>
+        <div style={{fontSize:11,fontWeight:700,color:"#94a3b8",marginBottom:7}}>이 날짜에 바로 추가 (마감일 자동 지정)</div>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+          <input style={{...inp,flex:"1 1 150px"}} placeholder="태스크명" value={title} onChange={e=>setTitle(e.target.value)} onKeyDown={e=>e.key==="Enter"&&add()}/>
+          <select style={{...inp,width:110}} value={pid} onChange={e=>setPid(e.target.value)}>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select>
+          <select style={{...inp,width:80}} value={cat} onChange={e=>setCat(e.target.value)}>{CAT_OPTS.map(c=><option key={c}>{c}</option>)}</select>
+          <button onClick={add} style={{padding:"8px 14px",borderRadius:8,background:"#6366f1",color:"#fff",border:"none",fontSize:12,fontWeight:700,cursor:"pointer"}}>추가</button>
+        </div>
+      </div>
+    </div>
+  </div>);
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 로그인 화면 — 등록된 Google 계정만 통과(허용목록은 Apps Script ALLOWED_EMAILS에서 관리)
+// ══════════════════════════════════════════════════════════════════
+
+const LOGIN_ERR_MSG={
+  not_allowed:"등록되지 않은 계정입니다 — 관리자에게 계정 등록을 요청하세요",
+  invalid_token:"로그인 확인에 실패했습니다 — 다시 시도해주세요",
+  client_mismatch:"앱 설정 오류(클라이언트 ID 불일치) — 관리자에게 문의하세요",
+  email_not_verified:"이메일이 확인되지 않은 계정입니다",
+  missing_token:"로그인 정보를 받지 못했습니다 — 다시 시도해주세요",
+};
+
+function LoginScreen({onLoggedIn}){
+  const btnRef=useRef(null);
+  const [err,setErr]=useState("");
+  const [busy,setBusy]=useState(false);
+
+  useEffect(()=>{
+    let cancelled=false;
+    const tryInit=()=>{
+      if(cancelled) return;
+      if(!window.google||!window.google.accounts||!window.google.accounts.id){ setTimeout(tryInit,200); return; }
+      window.google.accounts.id.initialize({
+        client_id: GOOGLE_CLIENT_ID,
+        callback: async (resp)=>{
+          setBusy(true); setErr("");
+          try{
+            const r=await googleLoginReq(resp.credential);
+            if(!r.ok) throw new Error(LOGIN_ERR_MSG[r.error]||r.error||"로그인 실패");
+            setSessionToken(r.token);
+            onLoggedIn();
+          }catch(e){ setErr(e.message); }
+          setBusy(false);
+        }
+      });
+      if(btnRef.current) window.google.accounts.id.renderButton(btnRef.current,{theme:"outline",size:"large",width:272});
+    };
+    tryInit();
+    return ()=>{ cancelled=true; };
+  },[]);
+
+  return(<div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",background:"#f1f5f9",fontFamily:"system-ui,-apple-system,'Segoe UI',sans-serif"}}>
+    <div style={{background:"#fff",borderRadius:16,padding:"38px 34px",boxShadow:"0 4px 24px rgba(15,23,42,.08)",textAlign:"center",width:320,border:"1px solid #e2e8f0"}}>
+      <div style={{fontSize:34,marginBottom:10}}>🗂</div>
+      <div style={{fontWeight:800,fontSize:17,color:"#1e293b",marginBottom:6}}>TaskBoard</div>
+      <div style={{fontSize:12,color:"#94a3b8",marginBottom:22}}>등록된 Google 계정으로 로그인하세요</div>
+      <div ref={btnRef} style={{display:"flex",justifyContent:"center"}}/>
+      {busy&&<div style={{fontSize:12,color:"#94a3b8",marginTop:14}}>로그인 처리 중...</div>}
+      {err&&<div style={{fontSize:12,color:"#ef4444",marginTop:14}}>{err}</div>}
+    </div>
+  </div>);
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 메인 App
+// ══════════════════════════════════════════════════════════════════
+
+function App(){
+  const [authed,setAuthed]=useState(()=>!!getSessionToken());
+  const [projects,setProjects]=useState(null);
+  const [tasks,setTasks]=useState(null);
+  const [selPid,setSelPid]=useState("ALL");
+  const [filter,setFilter]=useState("전체");
+  const [sort,setSort]=useState("마감순");
+  const [catFilter,setCatFilter]=useState("전체");
+  const [view,setView]=useState("dash"); // dash | cal | proj
+  const [sbOpen,setSbOpen]=useState(()=>window.innerWidth>760);
+  const [loaded,setLoaded]=useState(false);
+  const [showAddProj,setShowAddProj]=useState(false);
+  const [editingProjId,setEditingProjId]=useState(null); // null=새 프로젝트 추가 모드, id 있으면 수정 모드
+  const [showAddTask,setShowAddTask]=useState(false);
+  const [editingTaskId,setEditingTaskId]=useState(null); // null=새 태스크 추가 모드, id 있으면 수정 모드
+  const [showExport,setShowExport]=useState(false);
+  const [showNotion,setShowNotion]=useState(false);
+  const [newProj,setNewProj]=useState({name:"",color:COLORS[0],category:"WORK",deadline:"",details:[{org:"",amount:"",note:""}],notes:""});
+  const [newTask,setNewTask]=useState({title:"",status:"분류대기",category:"WORK",start:"",due:"",pid:"",recurrence:"none",recurrencePattern:{},recurrenceEndDate:""});
+  const [expOpt,setExpOpt]=useState({scope:"all",format:"byProject",projId:""});
+  const [alerts,setAlerts]=useState([]);
+  const [notifPerm,setNotifPerm]=useState("default");
+  const notified=useRef(new Set());
+  const [notionCfg,setNotionCfg]=useState(DEF_NCFG);
+  const [notionSync,setNotionSync]=useState({});
+  const [syncingId,setSyncingId]=useState(null);
+  const [notionDbs,setNotionDbs]=useState([]);
+  const [loadingDbs,setLoadingDbs]=useState(false);
+  const [selDbId,setSelDbId]=useState("");
+  const [notionErr,setNotionErr]=useState("");
+  const [manualDbUrl,setManualDbUrl]=useState("");
+  const [showDbChange,setShowDbChange]=useState(false);
+  const [tokenState,setTokenState]=useState("unknown"); // unknown|set|unset|old-backend
+  const [tokenInput,setTokenInput]=useState("");
+  const [savingToken,setSavingToken]=useState(false);
+  const [syncErr,setSyncErr]=useState({});
+  const [toast,setToast]=useState(null);
+  const [cloudOk,setCloudOk]=useState(true);
+  const [widgets,setWidgetsRaw]=useState(DEF_WIDGETS);
+  const [gcalBusy,setGcalBusy]=useState(false);
+
+  const lastSyncRef=useRef({});
+  const skipSaveRef=useRef(new Set());
+
+  // 세션 만료·거부 시 공통 처리 — 토큰을 지우고 로그인 화면으로 되돌린다
+  const forceLogout=()=>{ setSessionToken(null); setAuthed(false); setLoaded(false); };
+
+  // ── 최초 로드 ────────────────────────────────────────────────
+  useEffect(()=>{
+    if(!authed) return;
+    async function load(){
+      try{
+        const all=await cloudGetAll();
+        ['tmv3_proj','tmv3_tasks','tmv3_notified','tmv3_nconfig','tmv3_nsync','tmv3_widgets','tmv3_gcal'].forEach(k=>{
+          lastSyncRef.current[k]=all[k]&&all[k].updatedAt?all[k].updatedAt:null;
+        });
+        const pr=all.tmv3_proj,tk=all.tmv3_tasks,nt=all.tmv3_notified,nc=all.tmv3_nconfig,ns=all.tmv3_nsync,wg=all.tmv3_widgets;
+        setProjects(pr&&pr.value?JSON.parse(pr.value):DEF_PROJ);
+        setTasks(tk&&tk.value?JSON.parse(tk.value):DEF_TASKS);
+        if(nt&&nt.value)notified.current=new Set(JSON.parse(nt.value));
+        if(nc&&nc.value){const c=JSON.parse(nc.value);if(c.dbId){setNotionCfg(c);setSelDbId(c.dbId);}}
+        if(ns&&ns.value)setNotionSync(JSON.parse(ns.value));
+        if(wg&&wg.value)setWidgetsRaw({...DEF_WIDGETS,...JSON.parse(wg.value)});
+        setCloudOk(true);
+      }catch(e){
+        if(String(e.message).includes("unauthorized")){ forceLogout(); return; }
+        console.error("클라우드 로드 실패 — APPS_SCRIPT_URL 설정을 확인하세요:",e);
+        setCloudOk(false);
+        setProjects(DEF_PROJ);setTasks(DEF_TASKS);
+      }
+      setLoaded(true);
+      if("Notification" in window)setNotifPerm(Notification.permission);
+    }
+    load();
+  },[authed]);
+
+  // ── 로컬 변경 → 클라우드 저장 (write-through) ───────────────────
+  useEffect(()=>{
+    if(!loaded||!projects)return;
+    if(skipSaveRef.current.has('tmv3_proj')){skipSaveRef.current.delete('tmv3_proj');return;}
+    cloudSet('tmv3_proj',JSON.stringify(projects)).then(r=>{lastSyncRef.current.tmv3_proj=r.updatedAt;}).catch(()=>{});
+  },[projects,loaded]);
+
+  useEffect(()=>{
+    if(!loaded||!tasks)return;
+    if(skipSaveRef.current.has('tmv3_tasks')){skipSaveRef.current.delete('tmv3_tasks');return;}
+    cloudSet('tmv3_tasks',JSON.stringify(tasks)).then(r=>{lastSyncRef.current.tmv3_tasks=r.updatedAt;}).catch(()=>{});
+  },[tasks,loaded]);
+
+  const setWidgets=w=>{setWidgetsRaw(w);cloudSet('tmv3_widgets',JSON.stringify(w)).then(r=>{lastSyncRef.current.tmv3_widgets=r.updatedAt;}).catch(()=>{});};
+
+  // ── 30초 폴링 (다른 기기의 변경사항 수신) ────────────────────────
+  useEffect(()=>{
+    if(!loaded)return;
+    const iv=setInterval(async()=>{
+      try{
+        const all=await cloudGetAll();
+        setCloudOk(true);
+        if(all.tmv3_proj&&all.tmv3_proj.updatedAt&&all.tmv3_proj.updatedAt!==lastSyncRef.current.tmv3_proj){
+          lastSyncRef.current.tmv3_proj=all.tmv3_proj.updatedAt;
+          skipSaveRef.current.add('tmv3_proj');
+          setProjects(JSON.parse(all.tmv3_proj.value));
+        }
+        if(all.tmv3_tasks&&all.tmv3_tasks.updatedAt&&all.tmv3_tasks.updatedAt!==lastSyncRef.current.tmv3_tasks){
+          lastSyncRef.current.tmv3_tasks=all.tmv3_tasks.updatedAt;
+          skipSaveRef.current.add('tmv3_tasks');
+          setTasks(JSON.parse(all.tmv3_tasks.value));
+        }
+        if(all.tmv3_nsync&&all.tmv3_nsync.updatedAt&&all.tmv3_nsync.updatedAt!==lastSyncRef.current.tmv3_nsync){
+          lastSyncRef.current.tmv3_nsync=all.tmv3_nsync.updatedAt;
+          setNotionSync(JSON.parse(all.tmv3_nsync.value));
+        }
+        if(all.tmv3_nconfig&&all.tmv3_nconfig.updatedAt&&all.tmv3_nconfig.updatedAt!==lastSyncRef.current.tmv3_nconfig){
+          lastSyncRef.current.tmv3_nconfig=all.tmv3_nconfig.updatedAt;
+          const c=JSON.parse(all.tmv3_nconfig.value);if(c.dbId){setNotionCfg(c);setSelDbId(c.dbId);}
+        }
+        if(all.tmv3_widgets&&all.tmv3_widgets.updatedAt&&all.tmv3_widgets.updatedAt!==lastSyncRef.current.tmv3_widgets){
+          lastSyncRef.current.tmv3_widgets=all.tmv3_widgets.updatedAt;
+          setWidgetsRaw({...DEF_WIDGETS,...JSON.parse(all.tmv3_widgets.value)});
+        }
+      }catch(e){
+        if(String(e.message).includes("unauthorized")){ forceLogout(); return; }
+        setCloudOk(false);
+      }
+    },SYNC_INTERVAL_MS);
+    return ()=>clearInterval(iv);
+  },[loaded]);
+
+  // ── 마감 알림 ───────────────────────────────────────────────
+  useEffect(()=>{
+    if(!loaded||!tasks)return;
+    const check=()=>{
+      const td=toDay(),na=[];
+      tasks.forEach(t=>{
+        if(t.done||!t.due)return;
+        const dl=daysLeft(t.due);
+        ALERT_DAYS.forEach(ad=>{
+          if(dl===ad){const k=`${t.id}_${ad}_${td}`;if(!notified.current.has(k)){notified.current.add(k);const msg=ad===0?`오늘 마감 🔴 ${t.title}`:`📅 ${t.title} — ${ad}일 후 마감`;na.push({id:uid(),msg,days:ad});if("Notification" in window&&Notification.permission==="granted"){try{new Notification("📋 TaskBoard",{body:msg});}catch(e){}}}}
+        });
+      });
+      if(na.length){
+        setAlerts(a=>[...a,...na]);
+        cloudSet('tmv3_notified',JSON.stringify([...notified.current])).then(r=>{lastSyncRef.current.tmv3_notified=r.updatedAt;}).catch(()=>{});
+      }
+    };
+    check();const iv=setInterval(check,60000);return()=>clearInterval(iv);
+  },[loaded,tasks]);
+
+  // ── Notion 설정 모달 열릴 때 토큰 등록 여부 확인 ─────────────────
+  useEffect(()=>{
+    if(!showNotion)return;
+    setTokenState("unknown");
+    notionStatusReq().then(r=>{
+      if(r.ok)setTokenState(r.tokenSet?"set":"unset");
+      else if((r.error||"").includes("알 수 없는 action"))setTokenState("old-backend");
+      else setTokenState("unset");
+    }).catch(()=>setTokenState("unknown"));
+  },[showNotion]);
+
+  if(!authed) return <LoginScreen onLoggedIn={()=>setAuthed(true)}/>;
+  if(!loaded||!projects||!tasks)return <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",color:"#94a3b8",fontSize:14}}>불러오는 중...</div>;
+  const doLogout=async()=>{ try{ await logoutReq(); }catch(e){} forceLogout(); };
+  const PM=Object.fromEntries(projects.map(p=>[p.id,p]));
+  const showToast=(msg,ok=true)=>{setToast({msg,ok});setTimeout(()=>setToast(null),3500);};
+  const extractDbId=url=>{const m=(url||"").replace(/-/g,"").match(/[a-f0-9]{32}/i);if(!m)return null;const id=m[0];return`${id.slice(0,8)}-${id.slice(8,12)}-${id.slice(12,16)}-${id.slice(16,20)}-${id.slice(20)}`;};
+
+  const saveToken=async()=>{
+    if(!tokenInput.trim()){setNotionErr("토큰을 붙여넣어 주세요");return;}
+    setSavingToken(true);setNotionErr("");
+    try{
+      const r=await setNotionTokenReq(tokenInput.trim());
+      if(r.ok){setTokenState("set");setTokenInput("");showToast("Notion 토큰 등록 완료 ✅ 이제 📤 버튼으로 바로 동기화됩니다");}
+      else if((r.error||"").includes("알 수 없는 action"))setTokenState("old-backend");
+      else setNotionErr(r.error||"토큰 저장 실패");
+    }catch(e){setNotionErr("토큰 저장 실패: "+e.message);}
+    setSavingToken(false);
+  };
+  const loadNotionDbs=async()=>{
+    setNotionErr("");setLoadingDbs(true);
+    try{
+      const res=await notionSearch();
+      if(!res.ok)throw new Error(res.error||"조회 실패");
+      const dbs=(res.result.results||[]).map(db=>({id:db.id,title:(db.title||[]).map(t=>t.plain_text).join("")||"제목 없음"}));
+      setNotionDbs(dbs);
+      if(!dbs.length)setNotionErr("통합에 공유된 DB가 없습니다 — Notion에서 To do list 페이지 ··· → 연결 → 통합 추가를 확인하세요.");
+    }catch(e){setNotionErr("자동 조회 실패: "+e.message);}
+    setLoadingDbs(false);
+  };
+  const saveNotionCfg=()=>{
+    if(manualDbUrl.trim()){
+      const id=extractDbId(manualDbUrl.trim());
+      if(!id){setNotionErr("올바른 Notion DB URL 또는 ID를 입력해주세요.");return;}
+      const cfg={dbId:id,dbName:"직접 입력 DB"};
+      setNotionCfg(cfg);cloudSet('tmv3_nconfig',JSON.stringify(cfg)).then(r=>{lastSyncRef.current.tmv3_nconfig=r.updatedAt;}).catch(()=>{});
+      setShowNotion(false);showToast("Notion DB 연결 변경 완료 ✅");return;
+    }
+    if(selDbId&&selDbId!==notionCfg.dbId){
+      const db=notionDbs.find(d=>d.id===selDbId);
+      const cfg={dbId:selDbId,dbName:db?db.title:"선택 DB"};
+      setNotionCfg(cfg);cloudSet('tmv3_nconfig',JSON.stringify(cfg)).then(r=>{lastSyncRef.current.tmv3_nconfig=r.updatedAt;}).catch(()=>{});
+    }
+    setShowNotion(false);
+  };
+  const resetNotionDb=()=>{
+    setNotionCfg(DEF_NCFG);setSelDbId(NOTION_DB_ID);
+    cloudSet('tmv3_nconfig',JSON.stringify(DEF_NCFG)).then(r=>{lastSyncRef.current.tmv3_nconfig=r.updatedAt;}).catch(()=>{});
+    showToast("기본 DB(todolist 2)로 재설정했습니다");
+  };
+  const syncTask=async(taskId)=>{
+    const dbId=notionCfg.dbId||NOTION_DB_ID;
+    const task=tasks.find(t=>t.id===taskId);if(!task)return;
+    setSyncingId(taskId);setSyncErr(e=>({...e,[taskId]:""}));
+    try{
+      const existingId=notionSync[taskId];
+      const properties={
+        "이름":{title:[{text:{content:task.title}}]},
+        "상태":{select:{name:task.status||"분류대기"}},
+        "완료":{checkbox:!!task.done},
+      };
+      // 사용자 원본 DB의 category는 relation(→ category 2의 WORK/LIFE 페이지),
+      // 다른 DB로 바꿔 연결한 경우엔 관례적 Select로 전송한다.
+      if(dbId===NOTION_DB_ID){
+        const rel=NOTION_REL[task.category||"WORK"];
+        if(rel)properties["category"]={relation:[{id:rel}]};
+      }else{
+        properties["category"]={select:{name:task.category||"WORK"}};
+      }
+      if(task.start)properties["시작일"]={date:{start:task.start}};
+      if(task.due)properties["마감일"]={date:{start:task.due}};
+
+      const res=await notionUpsert(existingId||null,dbId,properties);
+      if(res.ok&&res.page_id){
+        const u={...notionSync,[taskId]:res.page_id};
+        setNotionSync(u);
+        cloudSet('tmv3_nsync',JSON.stringify(u)).then(r=>{lastSyncRef.current.tmv3_nsync=r.updatedAt;}).catch(()=>{});
+        showToast(`"${task.title}" Notion 동기화 완료 ✅`);
+      }else{
+        const em=res.error||"동기화 실패";
+        setSyncErr(e=>({...e,[taskId]:em}));
+        showToast("동기화 실패: "+em+(em.includes("토큰")?" — 🔗 Notion 연동 설정에서 토큰을 등록하세요":""),false);
+      }
+    }catch(e){
+      setSyncErr(er=>({...er,[taskId]:e.message}));
+      showToast("동기화 실패: "+e.message,false);
+    }
+    setSyncingId(null);
+  };
+  const gcalSync=async()=>{
+    setGcalBusy(true);
+    try{
+      const payload=tasks.map(t=>({id:t.id,title:t.title,start:t.start||"",due:t.due||"",done:!!t.done,category:t.category||"WORK",project:PM[t.pid]?.name||""}));
+      const r=await gcalSyncReq(payload);
+      if(r.ok){
+        lastSyncRef.current.tmv3_gcal=r.updatedAt;
+        showToast(`📆 구글 캘린더 동기화 완료 — 생성 ${r.created}·갱신 ${r.updated}·정리 ${r.removed}${r.skipped?` (마감일 없는 ${r.skipped}건 제외)`:""}`);
+      }else{
+        const em=r.error||"동기화 실패";
+        showToast(em.includes("알 수 없는 action")?"백엔드가 구버전입니다 — Apps Script에 Code.gs v2를 붙여넣고 새 버전으로 재배포해주세요 (사용법.md)":"구글 캘린더 동기화 실패: "+em,false);
+      }
+    }catch(e){showToast("구글 캘린더 동기화 실패: "+e.message,false);}
+    setGcalBusy(false);
+  };
+  const BLANK_PROJ={name:"",color:COLORS[0],category:"WORK",deadline:"",details:[{org:"",amount:"",note:""}],notes:""};
+  const openAddProj=()=>{setEditingProjId(null);setNewProj(BLANK_PROJ);setShowAddProj(true);};
+  const openEditProj=p=>{setEditingProjId(p.id);setNewProj({name:p.name,color:p.color,category:p.category||"WORK",deadline:p.deadline||"",details:p.details&&p.details.length?p.details:[{org:"",amount:"",note:""}],notes:p.notes||""});setShowAddProj(true);};
+  const saveProject=()=>{
+    if(!newProj.name.trim())return;
+    const details=newProj.category==="WORK"?newProj.details.filter(d=>d.org||d.amount||d.note):[];
+    const notes=newProj.category==="LIFE"?newProj.notes:"";
+    const deadline=newProj.deadline||"";
+    if(editingProjId){
+      const oldProj=projects.find(p=>p.id===editingProjId);
+      setProjects(p=>p.map(x=>x.id===editingProjId?{...x,name:newProj.name.trim(),color:newProj.color,category:newProj.category,deadline,details,notes}:x));
+      setTasks(t=>t.map(tk=>tk.pid===editingProjId&&tk.recurrence!=="none"?{...tk,recurrenceEndDate:deadline}:tk));
+      showToast(`"${newProj.name.trim()}" 프로젝트 수정 완료`);
+    }else{
+      setProjects(p=>[...p,{id:uid(),name:newProj.name.trim(),color:newProj.color,category:newProj.category,deadline,details,notes}]);
+    }
+    setEditingProjId(null);setNewProj(BLANK_PROJ);setShowAddProj(false);
+  };
+  const delProject=pid=>{setProjects(p=>p.filter(x=>x.id!==pid));setTasks(t=>t.filter(x=>x.pid!==pid));if(selPid===pid)setSelPid("ALL");};
+  const BLANK_TASK={title:"",status:"분류대기",category:"WORK",start:"",due:"",pid:"",recurrence:"none",recurrencePattern:{},recurrenceEndDate:""};
+  const openAddTask=()=>{const selectedProj=selPid!=="ALL"?projects.find(p=>p.id===selPid):null;setEditingTaskId(null);setNewTask({...BLANK_TASK,pid:selPid!=="ALL"?selPid:"",category:selectedProj?.category||"WORK"});setShowAddTask(true);};
+  const openEditTask=t=>{setEditingTaskId(t.id);setNewTask({title:t.title,status:t.status,category:t.category,start:t.start||"",due:t.due||"",pid:t.pid,recurrence:t.recurrence||"none",recurrencePattern:t.recurrencePattern||{},recurrenceEndDate:t.recurrenceEndDate||""});setShowAddTask(true);};
+  const saveTask=()=>{
+    if(!newTask.title.trim())return;
+    const pid=newTask.pid||(selPid!=="ALL"?selPid:projects[0]?.id||"");
+    if(!pid)return;
+    const selectedProj=projects.find(p=>p.id===pid);
+    if(newTask.due&&selectedProj?.deadline&&newTask.due>selectedProj.deadline){
+      showToast("프로젝트 기한을 초과할 수 없습니다",false);return;
+    }
+    const recurrenceEndDate=selectedProj?.deadline||"";
+    if(editingTaskId){
+      setTasks(t=>t.map(x=>x.id===editingTaskId?{...x,pid,title:newTask.title.trim(),status:newTask.status,category:newTask.category,start:newTask.start,due:newTask.due,recurrence:newTask.recurrence,recurrencePattern:newTask.recurrencePattern,recurrenceEndDate}:x));
+      showToast(`"${newTask.title.trim()}" 태스크 수정 완료`);
+    }else{
+      setTasks(t=>[...t,{id:uid(),pid,title:newTask.title.trim(),status:newTask.status,category:newTask.category,start:newTask.start,due:newTask.due,done:false,recurrence:newTask.recurrence,recurrencePattern:newTask.recurrencePattern,recurrenceEndDate,created:Date.now()}]);
+    }
+    setEditingTaskId(null);setNewTask(BLANK_TASK);setShowAddTask(false);
+  };
+  const quickAdd=({title,pid,category,due})=>{setTasks(t=>[...t,{id:uid(),pid,title,status:category==="LIFE"?"LIFE":"분류대기",category,start:"",due,done:false,created:Date.now()}]);showToast(`"${title}" 추가 완료 (${due} 마감)`);};
+  const getNextRecurrenceDate=(t)=>{
+    if(t.recurrence==="none"||!t.recurrence||!t.due)return null;
+    const proj=PM[t.pid];
+    const maxDate=proj?.deadline||"9999-12-31";
+    const curDate=new Date(t.due);
+    let nextDate=new Date(curDate);
+
+    if(t.recurrence==="daily"){
+      nextDate.setDate(nextDate.getDate()+1);
+    }else if(t.recurrence==="weekly"){
+      const weekdays=t.recurrencePattern?.weekdays||[];
+      for(let i=1;i<=7;i++){
+        const candidate=new Date(curDate);
+        candidate.setDate(candidate.getDate()+i);
+        if(weekdays.includes(candidate.getDay())){
+          nextDate=candidate;break;
+        }
+      }
+    }else if(t.recurrence==="biweekly"){
+      nextDate.setDate(nextDate.getDate()+14);
+    }else if(t.recurrence==="monthly"){
+      const monthday=t.recurrencePattern?.monthday||curDate.getDate();
+      nextDate.setMonth(nextDate.getMonth()+1);
+      nextDate.setDate(monthday);
+    }else if(t.recurrence==="yearly"){
+      nextDate.setFullYear(nextDate.getFullYear()+1);
+    }
+
+    const nextDateStr=fmtD(nextDate);
+    return nextDateStr<=maxDate?nextDateStr:null;
+  };
+  const toggleDone=id=>setTasks(t=>t.map(x=>{
+    if(x.id!==id)return x;
+    if(!x.done&&x.recurrence!=="none"&&x.recurrence){
+      const nextDate=getNextRecurrenceDate(x);
+      if(nextDate)return{...x,due:nextDate,done:false};
+    }
+    return{...x,done:!x.done};
+  }));
+  const delTask=id=>setTasks(t=>t.filter(x=>x.id!==id));
+  function stats(pid){const ts=pid==="ALL"?tasks:tasks.filter(t=>t.pid===pid);const total=ts.length,done=ts.filter(t=>t.done).length;return{total,done,urgent:ts.filter(t=>!t.done&&t.due&&daysLeft(t.due)>=0&&daysLeft(t.due)<=7).length,overdue:ts.filter(t=>!t.done&&t.due&&daysLeft(t.due)<0).length,pct:total?Math.round(done/total*100):0};}
+  function getVisible(){let ts=selPid==="ALL"?tasks:tasks.filter(t=>t.pid===selPid);let filterCat=null;if(selPid==="ALL"&&catFilter!=="전체")filterCat=catFilter;else if(selPid!=="ALL")filterCat=PM[selPid]?.category;if(filterCat)ts=ts.filter(t=>t.category===filterCat);if(filter==="진행중")ts=ts.filter(t=>!t.done);else if(filter==="완료")ts=ts.filter(t=>t.done);else if(filter==="마감임박")ts=ts.filter(t=>!t.done&&t.due&&daysLeft(t.due)>=0&&daysLeft(t.due)<=7);else if(filter==="기한초과")ts=ts.filter(t=>!t.done&&t.due&&daysLeft(t.due)<0);if(sort==="마감순"){return[...ts].sort((a,b)=>{const ad=a.due||"9999-12-31",bd=b.due||"9999-12-31";return ad>bd?1:ad<bd?-1:0;});}if(sort==="상태순")return[...ts].sort((a,b)=>STATUS_OPTS.indexOf(a.status)-STATUS_OPTS.indexOf(b.status));return[...ts].sort((a,b)=>b.created-a.created);}
+
+  // ── 엑셀 내보내기 (xlsx-js-style — 헤더 음영·테두리·색상 서식 적용) ──
+  const doExport=()=>{
+    const wb=XLSX.utils.book_new();
+    const hdr=["프로젝트","태스크","카테고리","상태","시작일","마감일","기간(일)","완료여부","남은일수"];
+    const row=t=>{const dl=daysLeft(t.due),dur=t.start&&t.due?Math.ceil((new Date(t.due)-new Date(t.start))/86400000):"";return[PM[t.pid]?.name||"",t.title,t.category||"",t.status||"",t.start||"",t.due||"",dur,t.done?"완료":"진행중",t.due?(dl<0?`${Math.abs(dl)}일 초과`:dl===0?"오늘":`${dl}일`):""];};
+    const thin={style:"thin",color:{rgb:"CBD5E1"}};
+    const bd={top:thin,bottom:thin,left:thin,right:thin};
+    const styleSheet=(ws,data)=>{
+      ws['!cols']=[{wch:16},{wch:34},{wch:10},{wch:12},{wch:12},{wch:12},{wch:9},{wch:10},{wch:11}];
+      for(let r=0;r<data.length;r++)for(let c=0;c<(data[r]||[]).length;c++){
+        const addr=XLSX.utils.encode_cell({r,c});if(!ws[addr])continue;
+        const isHdr=Array.isArray(data[r])&&data[r][0]===hdr[0]&&data[r][1]===hdr[1];
+        const isSub=data[r][0]==="[프로젝트 정보]"||data[r][0]==="관련기관";
+        let s={font:{sz:10.5,color:{rgb:"1E293B"}},border:bd,alignment:{vertical:"center",horizontal:c===1?"left":"center"}};
+        if(isHdr)s={font:{sz:10.5,bold:true,color:{rgb:"FFFFFF"}},fill:{fgColor:{rgb:"4F46E5"}},border:bd,alignment:{vertical:"center",horizontal:"center"}};
+        else if(isSub)s={font:{sz:10.5,bold:true,color:{rgb:"475569"}},fill:{fgColor:{rgb:"F1F5F9"}},border:bd,alignment:{vertical:"center",horizontal:c===1?"left":"center"}};
+        else{
+          const v=ws[addr].v;
+          if(c===2&&CC[v])s.font={sz:10.5,bold:true,color:{rgb:CC[v].slice(1).toUpperCase()}};
+          if(c===3&&SC[v])s.font={sz:10.5,bold:true,color:{rgb:SC[v].slice(1).toUpperCase()}};
+          if(c===7)s.font={sz:10.5,bold:true,color:{rgb:v==="완료"?"059669":"64748B"}};
+          if(c===8&&typeof v==="string"&&(v.includes("초과")||v==="오늘"))s.font={sz:10.5,bold:true,color:{rgb:"EF4444"}};
+          if(r%2===0)s.fill={fgColor:{rgb:"F8FAFC"}};
+        }
+        ws[addr].s=s;
+      }
+      if(ws['!ref'])ws['!rows']=Array.from({length:data.length},()=>({hpt:20}));
+    };
+    const scope=expOpt.scope==="project"&&expOpt.projId?tasks.filter(t=>t.pid===expOpt.projId):tasks;
+    if(expOpt.format==="byProject"){
+      [...new Set(scope.map(t=>t.pid))].forEach(pid=>{
+        const p=PM[pid],ts=scope.filter(t=>t.pid===pid),data=[hdr,...ts.map(row)];
+        if(p?.details?.length){data.push([]);data.push(["[프로젝트 정보]"]);data.push(["관련기관","금액","특이사항"]);p.details.forEach(d=>data.push([d.org,d.amount,d.note]));}
+        const ws=XLSX.utils.aoa_to_sheet(data);styleSheet(ws,data);
+        XLSX.utils.book_append_sheet(wb,ws,(p?.name||pid).slice(0,31));
+      });
+    }else{
+      const ts=expOpt.format==="byDate"?[...scope].sort((a,b)=>(a.due||"9")>(b.due||"9")?1:-1):scope;
+      const data=[hdr,...ts.map(row)];
+      const ws=XLSX.utils.aoa_to_sheet(data);styleSheet(ws,data);
+      XLSX.utils.book_append_sheet(wb,ws,expOpt.format==="byDate"?"날짜순":"전체");
+    }
+    const out=XLSX.write(wb,{bookType:"xlsx",type:"array"});
+    const url=URL.createObjectURL(new Blob([out],{type:"application/octet-stream"}));
+    Object.assign(document.createElement("a"),{href:url,download:`TaskBoard_${toDay().replace(/-/g,"")}.xlsx`}).click();
+    URL.revokeObjectURL(url);setShowExport(false);
+  };
+
+  const cs=stats(selPid),vis=getVisible(),SelP=selPid!=="ALL"?PM[selPid]:null;
+  const dStyle=due=>{const dl=daysLeft(due);if(dl===null)return{color:"#94a3b8"};if(dl<0||dl<=1)return{color:"#ef4444",fontWeight:600};if(dl<=5)return{color:"#f59e0b",fontWeight:600};if(dl<=7)return{color:"#f97316",fontWeight:600};return{color:"#94a3b8"};};
+  const dLabel=due=>{const dl=daysLeft(due);if(dl===null)return"";if(dl<0)return`${Math.abs(dl)}일 초과 ⚠️`;if(dl===0)return"오늘 마감 🔴";if(dl===1)return"내일 🟠";return`${dl}일 남음`;};
+  const inp={padding:"8px 10px",border:"1px solid #e2e8f0",borderRadius:7,fontSize:13,outline:"none",width:"100%",boxSizing:"border-box"};
+  const b=(bg,c)=>({padding:"7px 14px",borderRadius:8,background:bg,color:c||"#fff",border:"none",fontSize:12,fontWeight:600,cursor:"pointer"});
+  const lbl={fontSize:11,color:"#94a3b8",fontWeight:600,marginBottom:3,display:"block"};
+  const TABS=[{id:"dash",l:"📊 대시보드"},{id:"cal",l:"📅 캘린더"},{id:"proj",l:"🗂 프로젝트"}];
+
+  return(<div style={{display:"flex",flexDirection:"column",height:"100vh",fontFamily:"'Pretendard','Segoe UI',sans-serif",background:"#f1f5f9",overflow:"hidden"}}>
+    {toast&&<div style={{position:"fixed",top:16,left:"50%",transform:"translateX(-50%)",zIndex:400,background:toast.ok?"#1e293b":"#ef4444",color:"#fff",borderRadius:10,padding:"10px 20px",fontSize:13,fontWeight:600,boxShadow:"0 4px 16px rgba(0,0,0,.2)",maxWidth:"90vw"}}>{toast.msg}</div>}
+    {!cloudOk&&<div style={{position:"fixed",bottom:12,left:12,zIndex:300,background:"#fef2f2",border:"1px solid #fecaca",color:"#ef4444",borderRadius:9,padding:"8px 13px",fontSize:11,fontWeight:600}}>⚠️ 클라우드 연결 끊김 — 로컬 화면만 표시 중 (다음 폴링에서 재시도)</div>}
+    <div style={{position:"fixed",top:64,right:12,zIndex:300,display:"flex",flexDirection:"column",gap:6,maxWidth:300}}>
+      {alerts.slice(-4).map(a=>(<div key={a.id} style={{background:"#fff",border:`1.5px solid ${a.days<=1?"#ef4444":a.days<=5?"#f59e0b":"#6366f1"}`,borderRadius:9,padding:"10px 13px",boxShadow:"0 4px 14px rgba(0,0,0,.13)",display:"flex",gap:9,alignItems:"center"}}><span style={{fontSize:12,color:"#1e293b",flex:1}}>{a.msg}</span><span onClick={()=>setAlerts(al=>al.filter(x=>x.id!==a.id))} style={{cursor:"pointer",color:"#94a3b8",fontSize:13}}>✕</span></div>))}
+    </div>
+
+    {/* ── 상단 배너: 탭 3개 + 시계 ── */}
+    <div style={{display:"flex",alignItems:"center",gap:12,padding:"7px 14px",background:"#fff",borderBottom:"1px solid #e2e8f0",flexShrink:0,flexWrap:"wrap"}}>
+      <button onClick={()=>setSbOpen(o=>!o)} title="사이드바 열기/닫기" style={{width:34,height:34,borderRadius:9,border:"1px solid #e2e8f0",background:sbOpen?"#eef2ff":"#fff",color:"#6366f1",fontSize:15,cursor:"pointer",fontWeight:700}}>☰</button>
+      <span style={{fontWeight:800,fontSize:15,color:"#1e293b",letterSpacing:"-.2px"}}>📋 TaskBoard</span>
+      <div style={{display:"flex",gap:4,background:"#f1f5f9",borderRadius:11,padding:3}}>
+        {TABS.map(t=>(<button key={t.id} onClick={()=>setView(t.id)} style={{padding:"7px 14px",borderRadius:9,border:"none",background:view===t.id?"#6366f1":"transparent",color:view===t.id?"#fff":"#64748b",fontSize:12.5,fontWeight:700,cursor:"pointer",transition:"background .2s"}}>{t.l}</button>))}
+      </div>
+      <button onClick={openAddTask} style={{...b("#6366f1"),marginLeft:"auto"}}>＋ 태스크</button>
+      <AnalogClock/>
+    </div>
+
+    <div style={{display:"flex",flex:1,overflow:"hidden"}}>
+      {/* ── 사이드바 (접기/펼치기) ── */}
+      <div style={{width:sbOpen?224:0,transition:"width .25s ease",background:"#1e293b",display:"flex",flexDirection:"column",flexShrink:0,overflow:"hidden"}}>
+        <div style={{width:224,display:"flex",flexDirection:"column",height:"100%"}}>
+          <div style={{flex:1,overflowY:"auto",padding:"10px 0"}}>
+            <div onClick={()=>{setSelPid("ALL");setView("proj");}} style={{display:"flex",alignItems:"center",gap:8,padding:"9px 18px",cursor:"pointer",background:selPid==="ALL"&&view==="proj"?"#334155":"transparent",color:selPid==="ALL"?"#fff":"#94a3b8",fontSize:13,userSelect:"none"}}><span>🗂</span><span style={{flex:1}}>전체 프로젝트</span><span style={{fontSize:10,background:"#475569",padding:"1px 6px",borderRadius:10}}>{tasks.length}</span></div>
+            {projects.filter(p=>p.category==="WORK"||!p.category).length>0&&<><div style={{padding:"6px 18px",marginTop:4,fontSize:11,fontWeight:700,color:"#64748b"}}>💼 WORK</div>{projects.filter(p=>p.category==="WORK"||!p.category).map(p=>(<div key={p.id} onClick={()=>{setSelPid(p.id);setView("proj");}} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 18px",cursor:"pointer",background:selPid===p.id&&view==="proj"?"#334155":"transparent",color:selPid===p.id?"#fff":"#94a3b8",fontSize:13,userSelect:"none"}}><span style={{width:8,height:8,borderRadius:"50%",background:p.color,flexShrink:0}}/><span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:12}}>{p.name}</span><span style={{fontSize:10,background:"#475569",padding:"1px 6px",borderRadius:10,flexShrink:0}}>{tasks.filter(t=>t.pid===p.id).length}</span><span onClick={e=>{e.stopPropagation();openEditProj(p);}} title="프로젝트 수정" style={{fontSize:11,color:"#64748b",cursor:"pointer",marginLeft:2}}>✏</span><span onClick={e=>{e.stopPropagation();if(confirm(`"${p.name}" 프로젝트를 삭제하시겠습니까? 소속 태스크 ${tasks.filter(t=>t.pid===p.id).length}건도 함께 삭제됩니다.`))delProject(p.id);}} title="프로젝트 삭제" style={{fontSize:12,color:"#64748b",cursor:"pointer",marginLeft:2}}>✕</span></div>))}</>}
+            {projects.filter(p=>p.category==="LIFE").length>0&&<><div style={{padding:"6px 18px",marginTop:6,fontSize:11,fontWeight:700,color:"#64748b"}}>🎯 LIFE</div>{projects.filter(p=>p.category==="LIFE").map(p=>(<div key={p.id} onClick={()=>{setSelPid(p.id);setView("proj");}} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 18px",cursor:"pointer",background:selPid===p.id&&view==="proj"?"#334155":"transparent",color:selPid===p.id?"#fff":"#94a3b8",fontSize:13,userSelect:"none"}}><span style={{width:8,height:8,borderRadius:"50%",background:p.color,flexShrink:0}}/><span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontSize:12}}>{p.name}</span><span style={{fontSize:10,background:"#475569",padding:"1px 6px",borderRadius:10,flexShrink:0}}>{tasks.filter(t=>t.pid===p.id).length}</span><span onClick={e=>{e.stopPropagation();openEditProj(p);}} title="프로젝트 수정" style={{fontSize:11,color:"#64748b",cursor:"pointer",marginLeft:2}}>✏</span><span onClick={e=>{e.stopPropagation();if(confirm(`"${p.name}" 프로젝트를 삭제하시겠습니까? 소속 태스크 ${tasks.filter(t=>t.pid===p.id).length}건도 함께 삭제됩니다.`))delProject(p.id);}} title="프로젝트 삭제" style={{fontSize:12,color:"#64748b",cursor:"pointer",marginLeft:2}}>✕</span></div>))}</>}
+          </div>
+          <div style={{padding:"12px 14px",borderTop:"1px solid #334155",display:"flex",flexDirection:"column",gap:6}}>
+            {notifPerm!=="granted"&&<button onClick={async()=>{if("Notification" in window){const p=await Notification.requestPermission();setNotifPerm(p);}}} style={{...b("#f59e0b"),fontSize:11,display:"flex",justifyContent:"center"}}>🔔 알림 권한 허용</button>}
+            <button onClick={()=>setShowNotion(true)} style={{...b("#059669"),fontSize:11,display:"flex",justifyContent:"center",alignItems:"center",gap:4}}>🔗 Notion: {(notionCfg.dbName||"todolist 2").slice(0,11)}</button>
+            <button onClick={openAddProj} style={{...b("#334155"),fontSize:11,display:"flex",justifyContent:"center"}}>＋ 프로젝트 추가</button>
+            <button onClick={()=>setShowExport(true)} style={{...b("#10b981"),fontSize:11,display:"flex",justifyContent:"center"}}>📥 엑셀 내보내기</button>
+            <button onClick={doLogout} style={{...b("transparent","#94a3b8"),fontSize:11,display:"flex",justifyContent:"center",border:"1px solid #334155"}}>로그아웃</button>
+          </div>
+        </div>
+      </div>
+
+      {/* ── 본문 ── */}
+      {view==="dash"&&<DashboardView tasks={tasks} projects={projects} PM={PM} onToggle={toggleDone} widgets={widgets} setWidgets={setWidgets}/>}
+      {view==="cal"&&<CalendarView tasks={tasks} projects={projects} PM={PM} onToggle={toggleDone} onDelete={delTask} onQuickAdd={quickAdd} onGcal={gcalSync} gcalBusy={gcalBusy}/>}
+      {view==="proj"&&<div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"13px 22px",background:"#fff",borderBottom:"1px solid #e2e8f0"}}>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <div>
+              <div style={{fontWeight:700,fontSize:15,color:"#1e293b",display:"flex",alignItems:"center",gap:7}}>
+                <span>{selPid==="ALL"?"🗂":"📁"}</span>
+                {selPid==="ALL"?"전체 프로젝트":PM[selPid]?.name}
+                {SelP&&<span onClick={()=>openEditProj(SelP)} title="프로젝트 수정(이름·색상·기한·상세정보)" style={{cursor:"pointer",fontSize:12,color:"#94a3b8"}}>✏</span>}
+              </div>
+              <div style={{fontSize:11,color:"#94a3b8",display:"flex",alignItems:"center",gap:8}}>
+                <span>태스크 관리</span>
+                {SelP&&SelP.deadline&&<span style={dStyle(SelP.deadline)}>· 기한 {SelP.deadline} ({dLabel(SelP.deadline)})</span>}
+              </div>
+            </div>
+          </div>
+        </div>
+        <div style={{display:"flex",gap:10,padding:"12px 22px",background:"#fff",borderBottom:"1px solid #e2e8f0"}}>
+          {[{l:"전체",n:cs.total,c:"#6366f1"},{l:"완료",n:cs.done,c:"#10b981"},{l:"마감임박(7일)",n:cs.urgent,c:"#f59e0b"},{l:"기한초과",n:cs.overdue,c:"#ef4444"}].map(x=>(<div key={x.l} style={{flex:1,background:"#f8fafc",borderRadius:9,padding:"10px 14px",borderTop:`3px solid ${x.c}`}}><div style={{fontSize:20,fontWeight:700,color:"#1e293b"}}>{x.n}</div><div style={{fontSize:10,color:"#94a3b8",marginTop:1}}>{x.l}</div>{x.l==="완료"&&<div style={{marginTop:4}}><GaugeBar pct={cs.pct} color={x.c} h={3}/></div>}</div>))}
+        </div>
+        {SelP&&<ProjInfoPanel project={SelP} onUpdate={(data,field)=>setProjects(p=>p.map(x=>x.id===SelP.id?{...x,[field]:data}:x))}/>}
+        <div style={{display:"flex",gap:5,padding:"9px 22px",alignItems:"center",flexWrap:"wrap",background:"#fff",borderBottom:"1px solid #e2e8f0"}}>
+          {selPid==="ALL"&&["전체","WORK","LIFE"].map(c=>(<button key={c} onClick={()=>setCatFilter(c)} style={{padding:"4px 10px",borderRadius:20,border:`1px solid ${catFilter===c?(c==="WORK"?"#3b82f6":c==="LIFE"?"#10b981":"#6366f1"):"#e2e8f0"}`,background:catFilter===c?(c==="WORK"?"#3b82f6":c==="LIFE"?"#10b981":"#6366f1"):"transparent",color:catFilter===c?"#fff":"#64748b",fontSize:11,cursor:"pointer",fontWeight:catFilter===c?600:400}}>{c==="전체"?"🗂 전체":c}</button>))}
+          {selPid==="ALL"&&<div style={{width:1,height:16,background:"#e2e8f0",margin:"0 2px"}}/>}
+          {["마감임박","진행중","완료","기한초과","전체"].map(f=>(<button key={f} onClick={()=>setFilter(f)} style={{padding:"4px 10px",borderRadius:20,border:`1px solid ${filter===f?"#6366f1":"#e2e8f0"}`,background:filter===f?"#6366f1":"transparent",color:filter===f?"#fff":"#64748b",fontSize:11,cursor:"pointer",fontWeight:filter===f?600:400}}>{f}</button>))}
+          <select value={sort} onChange={e=>setSort(e.target.value)} style={{padding:"4px 8px",border:"1px solid #e2e8f0",borderRadius:7,fontSize:11,color:"#475569",outline:"none",marginLeft:"auto",background:"#fff"}}>{["마감순","상태순","생성일순"].map(o=><option key={o}>{o}</option>)}</select>
+        </div>
+        <div style={{flex:1,overflowY:"auto",padding:"12px 22px"}}>
+          {vis.length===0&&<div style={{textAlign:"center",color:"#cbd5e1",fontSize:14,padding:48}}>태스크가 없습니다</div>}
+          {vis.map(t=>{
+            const dl=daysLeft(t.due),dur=t.start&&t.due?Math.ceil((new Date(t.due.split('T')[0])-new Date(t.start.split('T')[0]))/86400000):null,isSynced=!!notionSync[t.id],isSyncing=syncingId===t.id;
+            return(<div key={t.id} style={{display:"flex",alignItems:"flex-start",gap:10,background:"#fff",borderRadius:10,padding:"11px 13px",marginBottom:7,boxShadow:"0 1px 3px rgba(0,0,0,.05)",opacity:t.done?.7:1,borderLeft:t.done?"none":`3px solid ${dl!==null&&dl<=1?"#ef4444":dl!==null&&dl<=5?"#f59e0b":"transparent"}`}}>
+              <div style={{marginTop:2}}><DoneBox done={t.done} onToggle={()=>toggleDone(t.id)}/></div>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:13.5,fontWeight:500,color:t.done?"#cbd5e1":"#1e293b",textDecoration:t.done?"line-through":"none",lineHeight:1.4}}>{t.title}</div>
+                <div style={{display:"flex",gap:5,marginTop:5,flexWrap:"wrap",alignItems:"center",color:t.done?"#cbd5e1":"inherit"}}>
+                  {selPid==="ALL"&&<span style={{fontSize:11,color:t.done?"#cbd5e1":PM[t.pid]?.color,fontWeight:600,display:"flex",alignItems:"center",gap:3}}><span style={{width:6,height:6,borderRadius:"50%",background:t.done?"#cbd5e1":PM[t.pid]?.color,display:"inline-block"}}/>{PM[t.pid]?.name}</span>}
+                  <span style={{fontSize:10,padding:"2px 7px",borderRadius:10,background:t.done?"#e2e8f0":(CC[t.category]||"#94a3b8")+"18",color:t.done?"#94a3b8":CC[t.category]||"#94a3b8",fontWeight:700}}>{t.category||"-"}</span>
+                  <span style={{fontSize:10,padding:"2px 7px",borderRadius:10,background:t.done?"#e2e8f0":(SC[t.status]||"#94a3b8")+"18",color:t.done?"#94a3b8":SC[t.status]||"#94a3b8",fontWeight:600}}>{t.status||"-"}</span>
+                  {t.start&&<span style={{fontSize:11,color:t.done?"#cbd5e1":"#94a3b8"}}>▶ {t.start}</span>}
+                  {t.due&&!t.done&&<span style={{fontSize:11,...dStyle(t.due)}}>⏰ {t.due} · {dLabel(t.due)}</span>}
+                  {t.due&&t.done&&<span style={{fontSize:11,color:"#cbd5e1"}}>⏰ {t.due}</span>}
+                  {dur!==null&&<span style={{fontSize:10,color:t.done?"#cbd5e1":"#94a3b8",background:t.done?"transparent":"#f1f5f9",padding:"1px 6px",borderRadius:8}}>{dur}일 기간</span>}
+                </div>
+              </div>
+              <button onClick={()=>syncTask(t.id)} disabled={isSyncing} style={{padding:"5px 9px",borderRadius:7,border:"none",fontSize:10,fontWeight:600,cursor:isSyncing?"wait":"pointer",background:isSyncing?"#f1f5f9":isSynced?"#d1fae5":"#ede9fe",color:isSyncing?"#94a3b8":isSynced?"#059669":"#6366f1",flexShrink:0,whiteSpace:"nowrap",marginTop:1}}>{isSyncing?"⏳ 전송 중":isSynced?"✓ 동기화됨":"📤 Notion"}</button>
+              <span onClick={()=>openEditTask(t)} title="태스크 수정" style={{fontSize:12,color:"#94a3b8",cursor:"pointer",padding:2,flexShrink:0}}>✏</span>
+              <span onClick={()=>{if(confirm(`"${t.title}" 태스크를 삭제하시겠습니까?`))delTask(t.id);}} style={{fontSize:13,color:"#cbd5e1",cursor:"pointer",padding:2,flexShrink:0}}>✕</span>
+            </div>);
+          })}
+        </div>
+      </div>}
+    </div>
+
+    {/* ── Notion 연동 설정 모달 ── */}
+    {showNotion&&(<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200}} onClick={()=>setShowNotion(false)}><div style={{background:"#fff",borderRadius:14,padding:24,width:460,maxHeight:"90vh",overflowY:"auto",boxShadow:"0 8px 32px rgba(0,0,0,.2)"}} onClick={e=>e.stopPropagation()}>
+      <div style={{fontWeight:700,fontSize:15,marginBottom:4}}>🔗 Notion 연동 설정</div>
+      <div style={{fontSize:12,color:"#94a3b8",marginBottom:16}}>내 To do list의 원본 DB가 미리 연결되어 있습니다 — 토큰만 1회 등록하면 끝</div>
+
+      <div style={{background:"#eef2ff",borderRadius:10,padding:"11px 14px",marginBottom:12,border:"1px solid #c7d2fe"}}>
+        <div style={{fontSize:12,fontWeight:700,color:"#4338ca",marginBottom:2}}>✓ 연결된 DB: {notionCfg.dbName||NOTION_DB_NAME}</div>
+        <div style={{fontSize:10,color:"#6366f1"}}>ID: {notionCfg.dbId||NOTION_DB_ID}</div>
+        {notionCfg.dbId&&notionCfg.dbId!==NOTION_DB_ID&&<button onClick={resetNotionDb} style={{...b("#eef2ff","#6366f1"),padding:"4px 10px",fontSize:11,marginTop:6,border:"1px solid #c7d2fe"}}>기본 DB(todolist 2)로 되돌리기</button>}
+      </div>
+
+      <div style={{background:tokenState==="set"?"#d1fae5":"#fffbeb",borderRadius:10,padding:"11px 14px",marginBottom:12,border:`1px solid ${tokenState==="set"?"#a7f3d0":"#fde68a"}`}}>
+        <div style={{fontSize:12,fontWeight:700,color:tokenState==="set"?"#059669":"#b45309",marginBottom:6}}>
+          {tokenState==="unknown"&&"⏳ 토큰 상태 확인 중..."}
+          {tokenState==="set"&&"✅ Notion 토큰 등록됨 — 바로 동기화 가능"}
+          {tokenState==="unset"&&"1️⃣ Notion 토큰 등록 필요 (최초 1회)"}
+          {tokenState==="old-backend"&&"⚠️ 백엔드 구버전 — Apps Script에 Code.gs v2 재배포 필요 (사용법.md)"}
+        </div>
+        {tokenState!=="old-backend"&&<>
+          <div style={{fontSize:11,color:"#92400e",marginBottom:7,display:tokenState==="set"?"none":"block"}}>
+            <a href="https://www.notion.so/my-integrations" target="_blank" rel="noreferrer" style={{color:"#b45309",fontWeight:700}}>notion.so/my-integrations</a>에서 통합의 Secret(ntn_...)을 복사해 붙여넣고 저장하세요. 이 앱이 서버(Script Properties)에 안전하게 보관합니다.
+          </div>
+          <div style={{display:"flex",gap:6}}>
+            <input style={{...inp,flex:1,fontSize:12}} type="password" placeholder={tokenState==="set"?"변경할 때만 새 토큰 입력":"ntn_... 또는 secret_..."} value={tokenInput} onChange={e=>setTokenInput(e.target.value)}/>
+            <button onClick={saveToken} disabled={savingToken} style={{...b(savingToken?"#f1f5f9":"#f59e0b",savingToken?"#94a3b8":undefined),flexShrink:0}}>{savingToken?"⏳":"저장"}</button>
+          </div>
+        </>}
+      </div>
+
+      <div style={{background:"#f8fafc",borderRadius:10,padding:"10px 13px",marginBottom:12,fontSize:11,color:"#64748b",border:"1px solid #e2e8f0"}}>
+        <div style={{fontWeight:700,marginBottom:3,color:"#475569"}}>2️⃣ Notion에서 통합 연결 확인 (최초 1회)</div>
+        Notion에서 <b>📕 To do list</b> 페이지 열기 → 우측 상단 ··· → <b>연결</b> → 만든 통합 선택. 이미 했다면 넘어가세요.
+      </div>
+      {notionErr&&<div style={{background:"#fef2f2",borderRadius:8,padding:"9px 13px",marginBottom:12,fontSize:12,color:"#ef4444",whiteSpace:"pre-line"}}>{notionErr}</div>}
+
+      <div onClick={()=>setShowDbChange(v=>!v)} style={{fontSize:11.5,color:"#94a3b8",cursor:"pointer",userSelect:"none",marginBottom:8}}>{showDbChange?"▲":"▼"} 다른 DB로 연결 변경 (고급)</div>
+      {showDbChange&&<div style={{border:"1px solid #e2e8f0",borderRadius:10,padding:12,marginBottom:12}}>
+        <div style={{fontSize:11,fontWeight:700,color:"#475569",marginBottom:6}}>방법 A — DB 목록 자동 조회</div>
+        <button onClick={loadNotionDbs} disabled={loadingDbs} style={{...b(loadingDbs?"#f1f5f9":"#6366f1",loadingDbs?"#94a3b8":undefined),width:"100%",marginBottom:notionDbs.length>0?8:10,fontSize:12,justifyContent:"center"}}>{loadingDbs?"⏳ 조회 중...":"🔍 Notion DB 목록 불러오기"}</button>
+        {notionDbs.length>0&&<select style={{...inp,marginBottom:10}} value={selDbId} onChange={e=>setSelDbId(e.target.value)}><option value="">선택하세요</option>{notionDbs.map(db=><option key={db.id} value={db.id}>{db.title}</option>)}</select>}
+        <div style={{fontSize:11,fontWeight:700,color:"#475569",marginBottom:6}}>방법 B — DB URL 직접 입력</div>
+        <input style={{...inp,fontSize:12}} placeholder="https://www.notion.so/... (⚠️ 페이지가 아닌 DB 전체 페이지 URL)" value={manualDbUrl} onChange={e=>setManualDbUrl(e.target.value)}/>
+        {manualDbUrl&&<div style={{fontSize:11,color:extractDbId(manualDbUrl)?"#059669":"#ef4444",marginTop:4}}>{extractDbId(manualDbUrl)?`✓ ID 인식됨: ${extractDbId(manualDbUrl)}`:"⚠️ 유효한 Notion URL/ID를 찾을 수 없음"}</div>}
+        <div style={{fontSize:10,color:"#94a3b8",marginTop:6}}>※ 여러 보기가 모인 대시보드 페이지 URL이 아니라, 표 DB를 전체 페이지로 열었을 때의 URL이어야 합니다.</div>
+      </div>}
+
+      <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+        <button onClick={()=>{setShowNotion(false);setNotionErr("");}} style={b("#f1f5f9","#64748b")}>닫기</button>
+        {showDbChange&&<button onClick={saveNotionCfg} style={b("#6366f1")}>연결 저장</button>}
+      </div>
+    </div></div>)}
+
+    {showAddProj&&(<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200}} onClick={()=>setShowAddProj(false)}><div style={{background:"#fff",borderRadius:14,padding:22,width:480,maxHeight:"85vh",overflowY:"auto",boxShadow:"0 8px 32px rgba(0,0,0,.2)"}} onClick={e=>e.stopPropagation()}>
+      <div style={{fontWeight:700,fontSize:14,marginBottom:14}}>{editingProjId?"✏ 프로젝트 수정":"새 프로젝트"}</div>
+      <label style={lbl}>프로젝트명</label><input style={{...inp,marginBottom:14}} value={newProj.name} onChange={e=>setNewProj(p=>({...p,name:e.target.value}))} placeholder="프로젝트명" autoFocus onKeyDown={e=>e.key==="Enter"&&saveProject()}/>
+      <div style={{display:"flex",gap:8,marginBottom:14}}><label style={{flex:1,display:"flex",alignItems:"center",gap:8,padding:"8px 12px",borderRadius:8,border:`2px solid ${newProj.category==="WORK"?"#6366f1":"#e2e8f0"}`,background:newProj.category==="WORK"?"#eef2ff":"#fff",cursor:"pointer",fontSize:13,fontWeight:600,color:newProj.category==="WORK"?"#6366f1":"#94a3b8"}}><input type="radio" checked={newProj.category==="WORK"} onChange={()=>setNewProj(p=>({...p,category:"WORK"}))} style={{accentColor:"#6366f1"}}/><span style={{color:newProj.category==="WORK"?"#1e293b":"#64748b"}}>💼 WORK</span></label><label style={{flex:1,display:"flex",alignItems:"center",gap:8,padding:"8px 12px",borderRadius:8,border:`2px solid ${newProj.category==="LIFE"?"#10b981":"#e2e8f0"}`,background:newProj.category==="LIFE"?"#ecfdf5":"#fff",cursor:"pointer",fontSize:13,fontWeight:600,color:newProj.category==="LIFE"?"#10b981":"#94a3b8"}}><input type="radio" checked={newProj.category==="LIFE"} onChange={()=>setNewProj(p=>({...p,category:"LIFE"}))} style={{accentColor:"#10b981"}}/><span style={{color:newProj.category==="LIFE"?"#1e293b":"#64748b"}}>🎯 LIFE</span></label></div>
+      <label style={lbl}>색상 선택</label><div style={{display:"flex",gap:8,alignItems:"center",marginBottom:14}}><input type="color" value={newProj.color} onChange={e=>setNewProj(p=>({...p,color:e.target.value}))} style={{width:50,height:40,borderRadius:8,border:"1px solid #e2e8f0",cursor:"pointer"}}/><div style={{display:"flex",gap:6}}>{COLORS.map(c=><div key={c} onClick={()=>setNewProj(p=>({...p,color:c}))} style={{width:26,height:26,borderRadius:"50%",background:c,cursor:"pointer",border:newProj.color===c?"3px solid #1e293b":"1px solid #e2e8f0",transition:"border .2s"}}/>)}</div></div>
+      <label style={lbl}>프로젝트 기한 <span style={{fontWeight:400}}>(선택)</span></label>
+      <input type="date" style={{...inp,marginBottom:14,maxWidth:200}} value={newProj.deadline} onChange={e=>setNewProj(p=>({...p,deadline:e.target.value}))}/>
+      {newProj.category==="WORK"&&(<><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}><label style={{...lbl,marginBottom:0}}>관련기관 / 금액 / 수행사 / 특이사항</label><button onClick={()=>setNewProj(p=>({...p,details:[...p.details,{org:"",amount:"",executor:"",note:""}]}))} style={{...b("#f1f5f9","#64748b"),padding:"4px 10px",fontSize:11}}>＋ 항목</button></div>
+      {newProj.details.map((d,i)=>(<div key={i} style={{display:"flex",gap:4,marginBottom:6,alignItems:"center"}}><input style={{...inp,flex:0.8}} placeholder="기관" value={d.org} onChange={e=>{const nd=[...newProj.details];nd[i]={...nd[i],org:e.target.value};setNewProj(p=>({...p,details:nd}));}}/><input style={{...inp,flex:0.8}} placeholder="금액" value={d.amount} onChange={e=>{const nd=[...newProj.details];nd[i]={...nd[i],amount:e.target.value};setNewProj(p=>({...p,details:nd}));}}/><input style={{...inp,flex:0.8}} placeholder="수행사" value={d.executor||""} onChange={e=>{const nd=[...newProj.details];nd[i]={...nd[i],executor:e.target.value};setNewProj(p=>({...p,details:nd}));}}/><input style={{...inp,flex:1}} placeholder="특이사항" value={d.note} onChange={e=>{const nd=[...newProj.details];nd[i]={...nd[i],note:e.target.value};setNewProj(p=>({...p,details:nd}));}}/>{newProj.details.length>1&&<span onClick={()=>setNewProj(p=>({...p,details:p.details.filter((_,j)=>j!==i)}))} style={{cursor:"pointer",color:"#94a3b8",fontSize:13,flexShrink:0}}>✕</span>}</div>))}</>)}
+      {newProj.category==="LIFE"&&(<><label style={lbl}>비고</label><textarea style={{...inp,marginBottom:14,minHeight:60,resize:"vertical",fontFamily:"inherit"}} value={newProj.notes} onChange={e=>setNewProj(p=>({...p,notes:e.target.value}))} placeholder="비고 (선택)"/></>)}
+      <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}><button onClick={()=>{setShowAddProj(false);setEditingProjId(null);}} style={b("#f1f5f9","#64748b")}>취소</button><button onClick={saveProject} style={b("#6366f1")}>{editingProjId?"저장":"추가"}</button></div>
+    </div></div>)}
+
+    {showAddTask&&(<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200}} onClick={()=>{setShowAddTask(false);setEditingTaskId(null);}}><div style={{background:"#fff",borderRadius:14,padding:22,width:440,maxHeight:"90vh",overflowY:"auto",boxShadow:"0 8px 32px rgba(0,0,0,.2)"}} onClick={e=>e.stopPropagation()}>
+      <div style={{fontWeight:700,fontSize:14,marginBottom:14}}>{editingTaskId?"✏ 태스크 수정":"새 태스크"}</div>
+      <label style={lbl}>태스크명</label><input style={{...inp,marginBottom:10}} value={newTask.title} onChange={e=>setNewTask(p=>({...p,title:e.target.value}))} placeholder="태스크명" autoFocus onKeyDown={e=>e.key==="Enter"&&saveTask()}/>
+      <label style={lbl}>프로젝트</label>
+      <select style={{...inp,marginBottom:10}} value={newTask.pid||(selPid!=="ALL"?selPid:projects[0]?.id||"")} onChange={e=>{const proj=projects.find(p=>p.id===e.target.value);setNewTask(p=>({...p,pid:e.target.value,category:proj?.category||"WORK"}));}}>
+        {projects.map(p=><option key={p.id} value={p.id}>{p.name} {p.category==="WORK"?"(💼)":"(🎯)"}</option>)}
+      </select>
+      {projects.find(p=>p.id===newTask.pid)?.deadline&&<div style={{fontSize:10,color:"#94a3b8",marginBottom:10,fontStyle:"italic"}}>📌 프로젝트 기한: {projects.find(p=>p.id===newTask.pid)?.deadline}</div>}
+      <div style={{display:"flex",gap:8,marginBottom:10}}><div style={{flex:1}}><label style={lbl}>카테고리</label><select style={inp} value={newTask.category} onChange={e=>setNewTask(p=>({...p,category:e.target.value}))} disabled>{CAT_OPTS.map(c=><option key={c}>{c}</option>)}</select></div><div style={{flex:1.6}}><label style={lbl}>상태</label><select style={inp} value={newTask.status} onChange={e=>setNewTask(p=>({...p,status:e.target.value}))}>{STATUS_OPTS.map(s=><option key={s}>{s}</option>)}</select></div></div>
+      <div style={{marginBottom:10}}><label style={lbl}>시작일 <span style={{fontWeight:400}}>(선택)</span></label><input type="date" style={inp} value={newTask.start} onChange={e=>setNewTask(p=>({...p,start:e.target.value}))}/></div>
+      <div style={{marginBottom:10}}><label style={lbl}>마감일</label><input type="date" style={inp} value={newTask.due} onChange={e=>setNewTask(p=>({...p,due:e.target.value}))}/></div>
+      {newTask.start&&newTask.due&&new Date(newTask.due)>=new Date(newTask.start)&&<div style={{fontSize:11,color:"#6366f1",marginBottom:8,fontWeight:600}}>📅 기간: {Math.ceil((new Date(newTask.due)-new Date(newTask.start))/86400000)+1}일</div>}
+      <label style={lbl}>반복 주기</label>
+      <select style={{...inp,marginBottom:10}} value={newTask.recurrence} onChange={e=>setNewTask(p=>({...p,recurrence:e.target.value,recurrencePattern:{}}))}>
+        {RECURRENCE_OPTS.map(r=><option key={r}>{r}</option>)}
+      </select>
+      {newTask.recurrence==="weekly"&&<><label style={lbl}>반복 요일 선택</label><div style={{display:"flex",gap:4,marginBottom:10}}>{WD.map((w,i)=><button key={i} onClick={()=>{const wd=newTask.recurrencePattern?.weekdays||[];const idx=wd.indexOf(i);if(idx>-1){const nwd=[...wd];nwd.splice(idx,1);setNewTask(p=>({...p,recurrencePattern:{weekdays:nwd}}));}else{setNewTask(p=>({...p,recurrencePattern:{weekdays:[...(p.recurrencePattern?.weekdays||[]),i].sort()}}));}}} style={{width:28,height:28,borderRadius:6,border:`2px solid ${(newTask.recurrencePattern?.weekdays||[]).includes(i)?"#6366f1":"#cbd5e1"}`,background:(newTask.recurrencePattern?.weekdays||[]).includes(i)?"#6366f1":"#fff",color:(newTask.recurrencePattern?.weekdays||[]).includes(i)?"#fff":"#64748b",fontSize:11,fontWeight:600,cursor:"pointer"}}>{w}</button>)}</div></>}
+      {newTask.recurrence==="monthly"&&<><label style={lbl}>반복 일자</label><input type="number" style={{...inp,marginBottom:10,maxWidth:80}} min="1" max="31" value={newTask.recurrencePattern?.monthday||1} onChange={e=>setNewTask(p=>({...p,recurrencePattern:{monthday:Number(e.target.value)}}))} placeholder="1"/></>}
+      <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:12}}><button onClick={()=>{setShowAddTask(false);setEditingTaskId(null);}} style={b("#f1f5f9","#64748b")}>취소</button><button onClick={saveTask} style={b("#6366f1")}>{editingTaskId?"저장":"추가"}</button></div>
+    </div></div>)}
+
+    {showExport&&(<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200}} onClick={()=>setShowExport(false)}><div style={{background:"#fff",borderRadius:14,padding:22,width:360,boxShadow:"0 8px 32px rgba(0,0,0,.2)"}} onClick={e=>e.stopPropagation()}>
+      <div style={{fontWeight:700,fontSize:14,marginBottom:14}}>📥 엑셀 내보내기</div>
+      <label style={lbl}>범위</label><select style={{...inp,marginBottom:10}} value={expOpt.scope} onChange={e=>setExpOpt(o=>({...o,scope:e.target.value,projId:""}))}><option value="all">전체 프로젝트</option><option value="project">특정 프로젝트</option></select>
+      {expOpt.scope==="project"&&<><label style={lbl}>프로젝트 선택</label><select style={{...inp,marginBottom:10}} value={expOpt.projId} onChange={e=>setExpOpt(o=>({...o,projId:e.target.value}))}><option value="">선택하세요</option>{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></>}
+      <label style={lbl}>형식</label>
+      <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:16}}>{[{v:"byProject",l:"📁 프로젝트별 (시트 분리)"},{v:"byDate",l:"📅 날짜순"},{v:"all",l:"📋 전체 목록"}].map(o=>(<label key={o.v} style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:12.5,color:"#1e293b"}}><input type="radio" name="fmt" value={o.v} checked={expOpt.format===o.v} onChange={()=>setExpOpt(x=>({...x,format:o.v}))} style={{accentColor:"#6366f1"}}/>{o.l}</label>))}</div>
+      <div style={{fontSize:10.5,color:"#94a3b8",marginBottom:12}}>· 헤더 음영·테두리·상태 색상 서식이 적용됩니다</div>
+      <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}><button onClick={()=>setShowExport(false)} style={b("#f1f5f9","#64748b")}>취소</button><button onClick={doExport} style={b("#10b981")}>📥 내보내기</button></div>
+    </div></div>)}
+  </div>);
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+<script>
+if('serviceWorker' in navigator){
+  window.addEventListener('load',()=>{navigator.serviceWorker.register('sw.js').catch(()=>{});});
+}
+</script>
+</body>
+</html>
