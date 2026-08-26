@@ -125,18 +125,34 @@ input:focus,select:focus,textarea:focus{outline:1px solid var(--accent);outline-
 .banner.warn{color:var(--accent)}
 .banner button{font-family:var(--mono);font-size:11px;color:var(--accent);text-decoration:underline;margin-left:auto}
 
-/* ── 화면 가림막(모달) ── */
-.sheet{position:fixed;inset:0;background:rgba(0,0,0,.94);z-index:50;display:flex;align-items:flex-end;justify-content:center;animation:fade .18s ease}
+/* ── 입력 화면 ──
+   하단 시트가 아니라 온전한 한 화면이다. 시트로 띄우면 위쪽이 빈 채로 남고,
+   그 빈 자리가 아래 탭 막대까지 덮어 눌러도 반응하지 않았다. */
+.sheet{position:fixed;inset:0;background:var(--bg);z-index:50;display:flex;align-items:stretch;justify-content:center;animation:fade .18s ease}
 @keyframes fade{from{opacity:0}to{opacity:1}}
 .sheet-in{
-  width:100%;max-width:640px;max-height:92dvh;overflow-y:auto;background:var(--bg);
-  border-top:1px solid var(--accent);padding:16px var(--pad) calc(env(safe-area-inset-bottom) + 18px);
+  width:100%;max-width:640px;height:100dvh;overflow-y:auto;background:var(--bg);
+  padding:0 var(--pad) calc(env(safe-area-inset-bottom) + 24px);
   animation:slideup .26s cubic-bezier(.22,1,.36,1);
 }
-@keyframes slideup{from{transform:translateY(16px);opacity:.4}to{transform:none;opacity:1}}
-.sheet-hd{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:15px}
+@keyframes slideup{from{transform:translateY(14px);opacity:.4}to{transform:none;opacity:1}}
+.sheet-hd{
+  display:flex;align-items:baseline;justify-content:space-between;
+  position:sticky;top:0;z-index:2;background:var(--bg);
+  padding:calc(env(safe-area-inset-top) + 15px) 0 11px;margin-bottom:14px;
+  border-bottom:1px solid var(--rule);
+}
 .sheet-hd h2{margin:0;font-family:var(--mono);font-size:12.5px;font-weight:500;letter-spacing:.06em;color:var(--accent)}
 .sheet-hd button{font-family:var(--mono);font-size:11.5px;color:var(--dim)}
+
+/* 무엇을 만들지 먼저 고른다 */
+.seg{display:flex;margin-bottom:17px}
+.seg button{
+  flex:1;font-family:var(--mono);font-size:12px;padding:9px 0;
+  border:1px solid var(--rule);color:var(--dim);margin-right:-1px;
+  transition:background .16s,color .16s,border-color .16s;
+}
+.seg button[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:#000;font-weight:600}
 .field{margin-bottom:13px}
 .field label{display:block;font-family:var(--mono);font-size:10.5px;letter-spacing:.09em;color:var(--dim);margin-bottom:5px}
 .pick{display:flex;flex-wrap:wrap;gap:0}
@@ -179,11 +195,21 @@ input:focus,select:focus,textarea:focus{outline:1px solid var(--accent);outline-
 
 /* ── 설정 ── */
 .sect{padding:16px var(--pad) 6px;font-family:var(--mono);font-size:10.5px;letter-spacing:.11em;color:var(--faint)}
+.sect-row{display:flex;align-items:center;justify-content:space-between;padding:16px var(--pad) 8px;border-bottom:1px solid var(--rule)}
+.sect-row .sect{padding:0}
+.mini{font-family:var(--mono);font-size:11.5px;color:var(--accent);border:1px solid var(--accent);padding:6px 12px;transition:background .16s,color .16s}
+.mini:hover{background:var(--accent);color:#000}
 .line{display:flex;align-items:center;gap:10px;padding:12px var(--pad);border-bottom:1px solid var(--rule-soft)}
+.line[role="button"]{cursor:pointer;transition:background .16s}
+.line[role="button"]:hover{background:var(--rule-soft)}
 .line .grow{flex:1;min-width:0}
 .line .name{font-size:13.5px}
 .line .sub{font-family:var(--mono);font-size:10.5px;color:var(--dim);margin-top:2px}
+.line .sub .sep{color:var(--faint)}
+.line .pnote{font-size:11.5px;color:var(--faint);margin-top:4px;padding-left:8px;border-left:1px solid var(--rule);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.line .chev{font-size:11px;color:var(--dim);flex-shrink:0}
 .line button.act{font-family:var(--mono);font-size:11px;color:var(--accent);border:1px solid var(--rule);padding:5px 10px}
+.warnbox{border:1px solid var(--accent);color:var(--accent);font-family:var(--mono);font-size:11.5px;line-height:1.7;padding:11px 13px;margin-top:6px}
 
 /* ── 로그인 ── */
 .login{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100dvh;gap:16px;padding:22px}
@@ -379,6 +405,7 @@ function migrateProj(p) {
     id: p.id || uid(),
     name: p.name || "",
     category: p.category === "LIFE" || p.category === "생활" ? "생활" : "업무",
+    start: p.start || "",
     deadline: p.deadline || "",
     note: p.notes || p.note || ""
   };
@@ -565,38 +592,59 @@ function repeatSay(f) {
   return "";
 }
 
-function TaskSheet(props) {
-  var init = props.task;
-  var st = useState(function () {
+function AddSheet(props) {
+  var editTask = props.task || null;
+  var editProj = props.proj || null;
+  // 고치는 중이면 갈아탈 수 없다 — 무엇을 고치는지가 이미 정해져 있다
+  var locked = editTask ? "task" : editProj ? "proj" : null;
+
+  var m0 = useState(locked || props.initMode || "task"); var mode = m0[0], setMode = m0[1];
+  var c0 = useState(false); var confirming = c0[0], setConfirming = c0[1];
+  var firstRef = useRef(null);
+
+  // ── 할 일 폼 ──────────────────────────────────────────────
+  var t0 = useState(function () {
+    var i = editTask;
     return {
-      title: init ? init.title : "",
-      status: init ? init.status : STATUS[0],
-      category: init ? init.category : "업무",
-      pid: init ? init.pid : "",
-      start: init ? init.start : "",
-      due: init ? init.due : "",
-      note: init ? (init.note || "") : "",
-      recurrence: init ? (init.recurrence || "none") : "none",
-      weekdays: init && init.recurrencePattern && init.recurrencePattern.weekdays ? init.recurrencePattern.weekdays : [],
-      monthday: init && init.recurrencePattern && init.recurrencePattern.monthday ? init.recurrencePattern.monthday : 0,
-      endDate: init ? (init.recurrenceEndDate || "") : "",
-      newProj: ""
+      title: i ? i.title : "",
+      status: i ? i.status : STATUS[0],
+      category: i ? i.category : "업무",
+      pid: i ? i.pid : "",
+      newProj: "",
+      start: i ? i.start : "",
+      due: i ? i.due : "",
+      note: i ? (i.note || "") : "",
+      recurrence: i ? (i.recurrence || "none") : "none",
+      weekdays: (i && i.recurrencePattern && i.recurrencePattern.weekdays) || [],
+      monthday: (i && i.recurrencePattern && i.recurrencePattern.monthday) || 0,
+      endDate: i ? (i.recurrenceEndDate || "") : ""
     };
   });
-  var f = st[0], setF = st[1];
-  var titleRef = useRef(null);
-  function up(k, v) { setF(function (p) { var n = {}; for (var x in p) n[x] = p[x]; n[k] = v; return n; }); }
+  var tf = t0[0], setTf = t0[1];
+  function upT(k, v) { setTf(function (p) { var n = {}; for (var x in p) n[x] = p[x]; n[k] = v; return n; }); }
 
-  // 시트가 올라오는 동안 focus를 주면 브라우저가 무시한다 — 애니메이션이 끝난 뒤에 준다
+  // ── 프로젝트 폼 ───────────────────────────────────────────
+  var p0 = useState(function () {
+    var i = editProj;
+    return {
+      name: i ? i.name : "",
+      start: i ? (i.start || "") : "",
+      deadline: i ? (i.deadline || "") : "",
+      note: i ? (i.note || "") : ""
+    };
+  });
+  var pf = p0[0], setPf = p0[1];
+  function upP(k, v) { setPf(function (p) { var n = {}; for (var x in p) n[x] = p[x]; n[k] = v; return n; }); }
+
+  // 시트가 올라오는 동안 focus를 주면 브라우저가 무시한다 — 다 올라온 뒤에 준다
   useEffect(function () {
-    var id = setTimeout(function () { if (titleRef.current) titleRef.current.focus(); }, 280);
+    var id = setTimeout(function () { if (firstRef.current) firstRef.current.focus(); }, 280);
     return function () { clearTimeout(id); };
-  }, []);
+  }, [mode]);
 
   // 반복을 고르는 순간 기준을 정해 둔다 — 매주는 마감일의 요일, 매월·매년은 마감일의 날짜.
-  // 기준을 안 붙들어 두면 2월에 28일로 당겨진 날짜가 그대로 새 기준이 되어 흘러간다.
   function pickRepeat(v) {
-    setF(function (p) {
+    setTf(function (p) {
       var n = {}; for (var x in p) n[x] = p[x];
       n.recurrence = v;
       var base = parseDay(p.due || today());
@@ -605,204 +653,258 @@ function TaskSheet(props) {
       return n;
     });
   }
+  function toggleDow(i) {
+    var arr = tf.weekdays.slice();
+    var at = arr.indexOf(i);
+    if (at === -1) arr.push(i); else arr.splice(at, 1);
+    upT("weekdays", arr);
+  }
 
-  function submit() {
-    var title = f.title.trim();
+  function submitTask() {
+    var title = tf.title.trim();
     if (!title) return;
     var pattern = {};
-    if (f.recurrence === "weekly") pattern = { weekdays: f.weekdays };
-    else if (f.recurrence === "monthly" || f.recurrence === "yearly") {
-      pattern = { monthday: f.monthday || parseDay(f.due || today()).getDate() };
+    if (tf.recurrence === "weekly") pattern = { weekdays: tf.weekdays };
+    else if (tf.recurrence === "monthly" || tf.recurrence === "yearly") {
+      pattern = { monthday: tf.monthday || parseDay(tf.due || today()).getDate() };
     }
-    props.onSave({
-      id: init ? init.id : null,
-      title: title,
-      note: f.note,
-      status: f.status,
-      category: f.category,
-      pid: f.pid,
-      newProj: f.newProj.trim(),
-      start: f.start,
-      due: f.due,
-      recurrence: f.recurrence,
-      recurrencePattern: pattern,
-      recurrenceEndDate: f.recurrence === "none" ? "" : f.endDate
+    props.onSaveTask({
+      id: editTask ? editTask.id : null,
+      title: title, note: tf.note, status: tf.status, category: tf.category,
+      pid: tf.pid, newProj: tf.newProj.trim(),
+      start: tf.start, due: tf.due,
+      recurrence: tf.recurrence, recurrencePattern: pattern,
+      recurrenceEndDate: tf.recurrence === "none" ? "" : tf.endDate
     });
   }
 
-  function toggleDow(i) {
-    var arr = f.weekdays.slice();
-    var at = arr.indexOf(i);
-    if (at === -1) arr.push(i); else arr.splice(at, 1);
-    up("weekdays", arr);
+  function submitProj() {
+    var name = pf.name.trim();
+    if (!name) return;
+    props.onSaveProj({
+      id: editProj ? editProj.id : null,
+      name: name, start: pf.start, deadline: pf.deadline, note: pf.note,
+      category: editProj ? editProj.category : "업무"
+    });
   }
 
+  var title = editTask ? "할 일 고치기" : editProj ? "프로젝트 고치기" : "새로 만들기";
+
   return html`
-    <div class="sheet" onClick=${function (e) { if (e.target === e.currentTarget) props.onClose(); }}>
+    <div class="sheet">
       <div class="sheet-in">
         <div class="sheet-hd">
-          <h2>${init ? "할 일 고치기" : "새 할 일"}</h2>
+          <h2>${title}</h2>
           <button onClick=${props.onClose}>닫기</button>
         </div>
 
-        <div class="field">
-          <label for="tb-title">할 일</label>
-          <input id="tb-title" value=${f.title} ref=${titleRef}
-                 onInput=${function (e) { up("title", e.target.value); }}
-                 onKeyDown=${function (e) { if (e.key === "Enter") submit(); }} />
-        </div>
+        ${!locked ? html`
+          <div class="seg">
+            <button aria-pressed=${mode === "task" ? "true" : "false"}
+                    onClick=${function () { setMode("task"); }}>할 일</button>
+            <button aria-pressed=${mode === "proj" ? "true" : "false"}
+                    onClick=${function () { setMode("proj"); }}>프로젝트</button>
+          </div>` : null}
 
-        <div class="field">
-          <label>분류</label>
-          <div class="pick">
-            ${STATUS.map(function (s) {
-              return html`<button aria-pressed=${f.status === s ? "true" : "false"}
-                                  onClick=${function () { up("status", s); }}>${s}</button>`;
-            })}
+        ${mode === "task" ? html`
+          <div class="field">
+            <label for="tb-title">할 일</label>
+            <input id="tb-title" ref=${mode === "task" ? firstRef : null} value=${tf.title}
+                   onInput=${function (e) { upT("title", e.target.value); }}
+                   onKeyDown=${function (e) { if (e.key === "Enter") submitTask(); }} />
           </div>
-        </div>
 
-        <div class="field">
-          <label>업무 · 생활</label>
-          <div class="pick">
-            ${CATS.map(function (c) {
-              return html`<button aria-pressed=${f.category === c ? "true" : "false"}
-                                  onClick=${function () { up("category", c); }}>${c}</button>`;
-            })}
-          </div>
-        </div>
-
-        <div class="field">
-          <label for="tb-proj">프로젝트</label>
-          <select id="tb-proj" value=${f.pid} onChange=${function (e) { up("pid", e.target.value); }}>
-            <option value="">없음</option>
-            ${props.projects.map(function (p) { return html`<option value=${p.id}>${p.name}</option>`; })}
-          </select>
-          <input style="margin-top:7px" placeholder="새 프로젝트 이름 (비워두면 안 만듭니다)"
-                 value=${f.newProj} onInput=${function (e) { up("newProj", e.target.value); }} />
-        </div>
-
-        <div class="field duo">
-          <div>
-            <label for="tb-s">시작</label>
-            <input id="tb-s" type="date" value=${f.start} onInput=${function (e) { up("start", e.target.value); }} />
-          </div>
-          <div>
-            <label for="tb-e">마감</label>
-            <input id="tb-e" type="date" value=${f.due} onInput=${function (e) { up("due", e.target.value); }} />
-          </div>
-        </div>
-
-        <div class="field">
-          <label>반복</label>
-          <div class="pick">
-            ${REPEATS.map(function (r) {
-              return html`<button aria-pressed=${f.recurrence === r.v ? "true" : "false"}
-                                  onClick=${function () { pickRepeat(r.v); }}>${r.l}</button>`;
-            })}
-          </div>
-          ${f.recurrence === "weekly" ? html`
-            <div class="pick" style="margin-top:7px">
-              ${DOW.map(function (d, i) {
-                return html`<button aria-pressed=${f.weekdays.indexOf(i) !== -1 ? "true" : "false"}
-                                    onClick=${function () { toggleDow(i); }}>${d}</button>`;
+          <div class="field">
+            <label>분류</label>
+            <div class="pick">
+              ${STATUS.map(function (s) {
+                return html`<button aria-pressed=${tf.status === s ? "true" : "false"}
+                                    onClick=${function () { upT("status", s); }}>${s}</button>`;
               })}
-            </div>` : null}
-          ${f.recurrence !== "none" ? html`
-            <div style="margin-top:9px">
-              <label for="tb-rend">반복 종료 (비워두면 계속)</label>
-              <input id="tb-rend" type="date" value=${f.endDate}
-                     onInput=${function (e) { up("endDate", e.target.value); }} />
             </div>
-            <div class="hintline">${repeatSay(f)}</div>` : null}
-        </div>
+          </div>
 
-        <div class="field">
-          <label for="tb-note">비고</label>
-          <textarea id="tb-note" rows="4" placeholder="적어 둘 것 — 연락처, 조건, 준비물, 무엇이든"
-                    value=${f.note} onInput=${function (e) { up("note", e.target.value); }}></textarea>
-        </div>
+          <div class="field">
+            <label>업무 · 생활</label>
+            <div class="pick">
+              ${CATS.map(function (c) {
+                return html`<button aria-pressed=${tf.category === c ? "true" : "false"}
+                                    onClick=${function () { upT("category", c); }}>${c}</button>`;
+              })}
+            </div>
+          </div>
 
-        <div class="actions">
-          ${init ? html`<button class="danger" onClick=${function () { props.onDelete(init.id); }}>지우기</button>` : null}
-          <button class="go" onClick=${submit}>${init ? "고치기" : "추가"}</button>
-        </div>
+          <div class="field">
+            <label for="tb-proj">프로젝트</label>
+            <select id="tb-proj" value=${tf.pid} onChange=${function (e) { upT("pid", e.target.value); }}>
+              <option value="">없음</option>
+              ${props.projects.map(function (p) { return html`<option value=${p.id}>${p.name}</option>`; })}
+            </select>
+            <input style="margin-top:7px" placeholder="여기 적으면 새 프로젝트로 만들어 붙입니다"
+                   value=${tf.newProj} onInput=${function (e) { upT("newProj", e.target.value); }} />
+          </div>
+
+          <div class="field duo">
+            <div>
+              <label for="tb-s">시작</label>
+              <input id="tb-s" type="date" value=${tf.start} onInput=${function (e) { upT("start", e.target.value); }} />
+            </div>
+            <div>
+              <label for="tb-e">마감</label>
+              <input id="tb-e" type="date" value=${tf.due} onInput=${function (e) { upT("due", e.target.value); }} />
+            </div>
+          </div>
+
+          <div class="field">
+            <label>반복</label>
+            <div class="pick">
+              ${REPEATS.map(function (r) {
+                return html`<button aria-pressed=${tf.recurrence === r.v ? "true" : "false"}
+                                    onClick=${function () { pickRepeat(r.v); }}>${r.l}</button>`;
+              })}
+            </div>
+            ${tf.recurrence === "weekly" ? html`
+              <div class="pick" style="margin-top:7px">
+                ${DOW.map(function (d, i) {
+                  return html`<button aria-pressed=${tf.weekdays.indexOf(i) !== -1 ? "true" : "false"}
+                                      onClick=${function () { toggleDow(i); }}>${d}</button>`;
+                })}
+              </div>` : null}
+            ${tf.recurrence !== "none" ? html`
+              <div style="margin-top:9px">
+                <label for="tb-rend">반복 종료 (비워두면 계속)</label>
+                <input id="tb-rend" type="date" value=${tf.endDate}
+                       onInput=${function (e) { upT("endDate", e.target.value); }} />
+              </div>
+              <div class="hintline">${repeatSay(tf)}</div>` : null}
+          </div>
+
+          <div class="field">
+            <label for="tb-note">비고</label>
+            <textarea id="tb-note" rows="4" placeholder="적어 둘 것 — 연락처, 조건, 준비물, 무엇이든"
+                      value=${tf.note} onInput=${function (e) { upT("note", e.target.value); }}></textarea>
+          </div>
+
+          ${editTask && confirming ? html`
+            <div class="warnbox">이 할 일을 지웁니다. 되돌릴 수 없습니다.</div>
+            <div class="actions">
+              <button onClick=${function () { setConfirming(false); }}>그만</button>
+              <button class="go" onClick=${function () { props.onDeleteTask(editTask.id); }}>지웁니다</button>
+            </div>`
+          : html`
+            <div class="actions">
+              ${editTask ? html`<button class="danger" onClick=${function () { setConfirming(true); }}>지우기</button>` : null}
+              <button class="go" onClick=${submitTask}>${editTask ? "고치기" : "추가"}</button>
+            </div>`}
+        ` : html`
+          <div class="field">
+            <label for="pj-name">프로젝트명</label>
+            <input id="pj-name" ref=${mode === "proj" ? firstRef : null} value=${pf.name}
+                   onInput=${function (e) { upP("name", e.target.value); }}
+                   onKeyDown=${function (e) { if (e.key === "Enter") submitProj(); }} />
+          </div>
+
+          <div class="field duo">
+            <div>
+              <label for="pj-s">시작</label>
+              <input id="pj-s" type="date" value=${pf.start} onInput=${function (e) { upP("start", e.target.value); }} />
+            </div>
+            <div>
+              <label for="pj-e">마감</label>
+              <input id="pj-e" type="date" value=${pf.deadline} onInput=${function (e) { upP("deadline", e.target.value); }} />
+            </div>
+          </div>
+          <div class="hintline">기한은 둘 다 비워둬도 됩니다. 마감을 모르면 시작만 적어 두세요.</div>
+
+          <div class="field" style="margin-top:13px">
+            <label for="pj-note">비고</label>
+            <textarea id="pj-note" rows="4" placeholder="발주처, 금액, 조건 — 무엇이든"
+                      value=${pf.note} onInput=${function (e) { upP("note", e.target.value); }}></textarea>
+          </div>
+
+          ${editProj && confirming ? html`
+            <div class="warnbox">
+              정말 지울까요? 딸린 할 일 ${props.taskCount}건은 지워지지 않고 프로젝트만 떨어집니다.
+            </div>
+            <div class="actions">
+              <button onClick=${function () { setConfirming(false); }}>그만</button>
+              <button class="go" onClick=${function () { props.onDeleteProj(editProj.id); }}>지웁니다</button>
+            </div>`
+          : html`
+            <div class="actions">
+              ${editProj ? html`<button class="danger" onClick=${function () { setConfirming(true); }}>지우기</button>` : null}
+              <button class="go" onClick=${submitProj}>${editProj ? "고치기" : "만들기"}</button>
+            </div>`}
+        `}
       </div>
     </div>`;
 }
 
-// ══════════════════════════════════════════════════════════════
-// 설정 시트
-// ══════════════════════════════════════════════════════════════
-function SettingSheet(props) {
-  var st = useState(""); var editing = st[0], setEditing = st[1];
-  var st2 = useState(""); var name = st2[0], setName = st2[1];
-
+// 설정 — 하단 시트가 아니라 온전한 한 화면이다.
+// 종전에는 시트로 떠서 위쪽 절반이 빈 채로 남았고, 프로젝트를 만들 자리도 없었다.
+function ConfigView(props) {
   return html`
-    <div class="sheet" onClick=${function (e) { if (e.target === e.currentTarget) props.onClose(); }}>
-      <div class="sheet-in">
-        <div class="sheet-hd">
-          <h2>설정</h2>
-          <button onClick=${props.onClose}>닫기</button>
-        </div>
+    <div>
+      <div class="sect-row">
+        <span class="sect">프로젝트 ${props.projects.length}</span>
+        <button class="mini" onClick=${props.onNewProj}>＋ 새로 만들기</button>
+      </div>
 
-        <div class="sect">프로젝트</div>
-        ${props.projects.length === 0
-          ? html`<div class="empty"><b>아직 없습니다</b>할 일을 추가할 때 만들 수 있습니다</div>`
-          : props.projects.map(function (p) {
-              var mine = props.tasks.filter(function (t) { return t.pid === p.id; }).length;
-              if (editing === p.id) {
-                return html`
-                  <div class="line" key=${p.id}>
-                    <input value=${name} onInput=${function (e) { setName(e.target.value); }} />
-                    <button class="act" onClick=${function () {
-                      if (name.trim()) props.onRenameProj(p.id, name.trim());
-                      setEditing("");
-                    }}>저장</button>
-                  </div>`;
-              }
-              return html`
-                <div class="line" key=${p.id}>
-                  <div class="grow">
-                    <div class="name">${p.name}</div>
-                    <div class="sub">${p.category} · 할 일 ${mine}건${p.deadline ? " · 기한 " + p.deadline : ""}</div>
+      ${props.projects.length === 0
+        ? html`<div class="empty">
+                 <b>아직 프로젝트가 없습니다</b>
+                 위 「＋ 새로 만들기」로 만들거나,<br />
+                 할 일을 추가할 때 그 자리에서 만들 수 있습니다
+               </div>`
+        : props.projects.map(function (p) {
+            var mine = props.tasks.filter(function (t) { return t.pid === p.id; });
+            var open = mine.filter(function (t) { return !t.done; }).length;
+            return html`
+              <div class="line" role="button" tabindex="0" key=${p.id}
+                   onClick=${function () { props.onEditProj(p); }}
+                   onKeyDown=${function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); props.onEditProj(p); } }}>
+                <div class="grow">
+                  <div class="name">${p.name}</div>
+                  <div class="sub">
+                    할 일 ${mine.length}건${open ? " (진행 " + open + ")" : ""}
+                    ${p.start || p.deadline ? html`<span class="sep"> · </span>${(p.start || "") + (p.start && p.deadline ? " ~ " : "") + (p.deadline || (p.start ? " ~" : ""))}` : null}
                   </div>
-                  <button class="act" onClick=${function () { setEditing(p.id); setName(p.name); }}>이름</button>
-                  <button class="act" onClick=${function () { props.onDeleteProj(p.id); }}>지우기</button>
-                </div>`;
-            })}
+                  ${p.note ? html`<div class="pnote">${p.note.split("\n")[0]}</div>` : null}
+                </div>
+                <span class="chev mono">고치기</span>
+              </div>`;
+          })}
 
-        <div class="sect">구글 캘린더</div>
-        <div class="line">
-          <div class="grow">
-            <div class="name">마감일을 캘린더로 보내기</div>
-            <div class="sub">마감이 있는 할 일만 종일 일정으로 올립니다</div>
-          </div>
-          <button class="act" disabled=${props.gcalBusy}
-                  onClick=${props.onGcal}>${props.gcalBusy ? "보내는 중" : "보내기"}</button>
+      <div class="sect">구글 캘린더</div>
+      <div class="line">
+        <div class="grow">
+          <div class="name">마감일을 캘린더로 보내기</div>
+          <div class="sub">마감이 있는 할 일만 종일 일정으로 올립니다</div>
         </div>
+        <button class="act" disabled=${props.gcalBusy}
+                onClick=${props.onGcal}>${props.gcalBusy ? "보내는 중" : "보내기"}</button>
+      </div>
 
-        <div class="sect">마감 알림</div>
-        <div class="line">
-          <div class="grow">
-            <div class="name">${props.notifyState === "granted" ? "켜져 있습니다" : props.notifyState === "denied" ? "브라우저에서 막혀 있습니다" : props.notifyState === "unsupported" ? "이 브라우저는 지원하지 않습니다" : "꺼져 있습니다"}</div>
-            <div class="sub">마감 ${SOON_DAYS}일 전부터 하루 한 번 알립니다</div>
-          </div>
-          ${props.notifyState === "default"
-            ? html`<button class="act" onClick=${props.onAskNotify}>켜기</button>`
-            : null}
+      <div class="sect">마감 알림</div>
+      <div class="line">
+        <div class="grow">
+          <div class="name">${props.notifyState === "granted" ? "켜져 있습니다" : props.notifyState === "denied" ? "브라우저에서 막혀 있습니다" : props.notifyState === "unsupported" ? "이 브라우저는 지원하지 않습니다" : "꺼져 있습니다"}</div>
+          <div class="sub">마감 ${SOON_DAYS}일 전부터 하루 한 번 알립니다</div>
         </div>
+        ${props.notifyState === "default"
+          ? html`<button class="act" onClick=${props.onAskNotify}>켜기</button>`
+          : null}
+      </div>
 
-        <div class="sect">계정</div>
-        <div class="line">
-          <div class="grow"><div class="name">로그아웃</div><div class="sub">이 기기에서만 나갑니다</div></div>
-          <button class="act" onClick=${props.onLogout}>나가기</button>
-        </div>
+      <div class="sect">계정</div>
+      <div class="line">
+        <div class="grow"><div class="name">로그아웃</div><div class="sub">이 기기에서만 나갑니다</div></div>
+        <button class="act" onClick=${props.onLogout}>나가기</button>
+      </div>
 
-        <div class="hintline" style="padding:16px 0 4px">
-          자료는 구글 스프레드시트에 저장됩니다. 연결이 끊긴 동안에는 아무것도 저장하지 않고,
-          다시 이어지면 마지막 변경을 자동으로 올립니다.
-        </div>
+      <div class="hintline" style="padding:16px var(--pad) 26px">
+        자료는 구글 스프레드시트에 저장됩니다. 연결이 끊긴 동안에는 아무것도 저장하지 않고,
+        다시 이어지면 마지막 변경을 자동으로 올립니다.
       </div>
     </div>`;
 }
@@ -1089,17 +1191,28 @@ function App() {
     say("지웠습니다");
   }
 
-  function renameProj(id, name) {
+  // 프로젝트 만들기·고치기 겸용
+  function saveProj(form) {
     setProjects(function (prev) {
-      var next = prev.map(function (p) {
-        if (p.id !== id) return p;
-        var c = {}; for (var k in p) c[k] = p[k];
-        c.name = name;
-        return c;
-      });
+      var next;
+      if (form.id) {
+        next = prev.map(function (p) {
+          if (p.id !== form.id) return p;
+          var c = {}; for (var k in p) c[k] = p[k];
+          c.name = form.name; c.start = form.start; c.deadline = form.deadline; c.note = form.note;
+          return c;
+        });
+      } else {
+        next = prev.concat([{
+          id: uid(), name: form.name, category: form.category || "업무",
+          start: form.start, deadline: form.deadline, note: form.note
+        }]);
+      }
       saveProjects(next);
       return next;
     });
+    setSheet(null);
+    say(form.id ? "고쳤습니다" : "\"" + form.name + "\" 프로젝트를 만들었습니다");
   }
 
   function deleteProj(id) {
@@ -1118,6 +1231,7 @@ function App() {
       saveTasks(next);
       return next;
     });
+    setSheet(null);
     say("프로젝트를 지웠습니다 — 할 일은 남습니다");
   }
 
@@ -1178,7 +1292,8 @@ function App() {
 
   var now = new Date();
   // 지금 보고 있는 것을 명령 한 줄로 되비춘다. 달력일 때는 필터가 아니라 그 달을 말한다.
-  var cmdText = view === "calendar" ? "calendar"
+  var cmdText = view === "config" ? "config"
+              : view === "calendar" ? "calendar"
               : filter === "진행중" ? "tasks --active"
               : filter === "기한임박" ? "tasks --due " + SOON_DAYS + "d"
               : "tasks --all";
@@ -1190,7 +1305,11 @@ function App() {
         <span class="today mono">${fmtD(now)} ${DOW[now.getDay()]}</span>
       </div>
 
-      <div class="cmd">${">"} <b>${cmdText}</b>${phase === "ready" ? html`<span> — ${counts.open}건 진행중 · ${counts.soon}건 ${SOON_DAYS}일 안</span>` : null}<span class="caret"></span></div>
+      <div class="cmd">${">"} <b>${cmdText}</b>${phase === "ready" ? html`<span> — ${
+        view === "config"
+          ? "프로젝트 " + projects.length + " · 할 일 " + tasks.length
+          : counts.open + "건 진행중 · " + counts.soon + "건 " + SOON_DAYS + "일 안"
+      }</span>` : null}<span class="caret"></span></div>
 
       ${phase === "offline" ? html`
         <div class="banner warn">
@@ -1240,33 +1359,13 @@ function App() {
         ${phase === "ready" && view === "calendar" ? html`
           <${Calendar} tasks=${tasks} projName=${projName} onToggle=${toggleDone}
                        onOpen=${function (task) { setSheet({ task: task }); }} />` : null}
-      </div>
 
-      ${phase === "ready" ? html`
-        <button class="fab" onClick=${function () { setSheet("new"); }} aria-label="할 일 추가">＋</button>` : null}
-
-      <div class="tabs">
-        <button aria-current=${view === "tasks" ? "page" : null} onClick=${function () { setView("tasks"); }}>tasks</button>
-        <button aria-current=${view === "calendar" ? "page" : null} onClick=${function () { setView("calendar"); }}>calendar</button>
-        <button onClick=${function () { setSheet("settings"); }}>config</button>
-      </div>
-
-      ${toast ? html`<div class="toast">${toast}</div>` : null}
-
-      ${sheet === "new" ? html`
-        <${TaskSheet} task=${null} projects=${projects}
-                      onSave=${saveTask} onDelete=${deleteTask}
-                      onClose=${function () { setSheet(null); }} />` : null}
-
-      ${sheet && sheet.task ? html`
-        <${TaskSheet} task=${sheet.task} projects=${projects}
-                      onSave=${saveTask} onDelete=${deleteTask}
-                      onClose=${function () { setSheet(null); }} />` : null}
-
-      ${sheet === "settings" ? html`
-        <${SettingSheet} projects=${projects} tasks=${tasks}
+        ${phase === "ready" && view === "config" ? html`
+          <${ConfigView} projects=${projects} tasks=${tasks}
                          gcalBusy=${gcalBusy} onGcal=${sendGcal}
                          notifyState=${notifyState}
+                         onNewProj=${function () { setSheet({ proj: null, newProj: true }); }}
+                         onEditProj=${function (p) { setSheet({ proj: p }); }}
                          onAskNotify=${function () {
                            if (!("Notification" in window)) return;
                            try {
@@ -1275,12 +1374,32 @@ function App() {
                              Notification.requestPermission(function (p) { setNotifyState(p); });
                            }
                          }}
-                         onRenameProj=${renameProj} onDeleteProj=${deleteProj}
                          onLogout=${function () {
                            cloudPost({ action: "logout" }).catch(function () {});
                            forceLogout();
-                         }}
-                         onClose=${function () { setSheet(null); }} />` : null}
+                         }} />` : null}
+      </div>
+
+      ${phase === "ready" && view !== "config" ? html`
+        <button class="fab" onClick=${function () { setSheet({}); }} aria-label="새로 만들기">＋</button>` : null}
+
+      <div class="tabs">
+        <button aria-current=${view === "tasks" ? "page" : null} onClick=${function () { setView("tasks"); }}>tasks</button>
+        <button aria-current=${view === "calendar" ? "page" : null} onClick=${function () { setView("calendar"); }}>calendar</button>
+        <button aria-current=${view === "config" ? "page" : null} onClick=${function () { setView("config"); }}>config</button>
+      </div>
+
+      ${toast ? html`<div class="toast">${toast}</div>` : null}
+
+      ${sheet ? html`
+        <${AddSheet} task=${sheet.task || null} proj=${sheet.proj || null}
+                     initMode=${sheet.newProj ? "proj" : "task"}
+                     projects=${projects}
+                     taskCount=${sheet.proj ? tasks.filter(function (t) { return t.pid === sheet.proj.id; }).length : 0}
+                     onSaveTask=${saveTask} onDeleteTask=${deleteTask}
+                     onSaveProj=${saveProj} onDeleteProj=${deleteProj}
+                     onClose=${function () { setSheet(null); }} />` : null}
+
     </div>`;
 }
 
