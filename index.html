@@ -8,35 +8,19 @@
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="icon-192.png">
 
-<!--
-  taskboard — 개인 할 일 관리 (SYS-217, 2026-08-26 전면 개편)
-
-  ■ 이 파일 하나가 앱 전체다. 빌드 단계가 없다.
-    수정 → GitHub에 이 파일 업로드 → 끝. (sw.js의 CACHE 상수도 함께 올릴 것)
-
-  ■ 라이브러리는 같은 폴더의 vendor-preact.js 하나뿐이다(preact+hooks+htm 13KB).
-    CDN에서 받아오지 않으므로 unpkg가 죽어도 앱은 산다.
-    외부 의존은 구글 로그인(GSI) 하나뿐이며 이것만은 자체 호스팅이 불가능하다.
-
-  ■ 데이터 안전 원칙 (SYS-217의 존재 이유)
-    1) 서버에서 데이터를 한 번이라도 받기 전에는 hydrated=false이고,
-       그동안 saveXXX()는 전부 즉시 반환한다 — 어떤 조작도 서버로 나가지 않는다.
-    2) 로드 실패 시 화면에 견본/기본 데이터를 채우지 않는다. 「연결 없음」을 띄운다.
-       (2026-08-25 사고: 실패 폴백이 개발용 견본이었고 그것이 원본을 덮었다)
-    3) 저장 실패는 삼키지 않는다. 화면에 남기고 연결 복구 시 재전송한다.
--->
-
 <script src="vendor-preact.js"></script>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 
 <style>
 :root{
-  color-scheme:dark;          /* 날짜 입력기·선택 목록도 어두운 판으로 그려진다 */
+  color-scheme:dark;
   --bg:#000000;
   --fg:#d6d6d6;
   --dim:#6a6a6a;
   --faint:#4a4a4a;
   --accent:#FFB000;
+  --work:#FFB000;
+  --life:#2EC4B6;
   --rule:#1e1e1e;
   --rule-soft:#141414;
   --out:#242424;
@@ -57,28 +41,22 @@ input,select,textarea{font:inherit;color:inherit;background:var(--bg);border:1px
 input:focus,select:focus,textarea:focus{outline:1px solid var(--accent);outline-offset:-1px;border-color:var(--accent)}
 :focus-visible{outline:1px solid var(--accent);outline-offset:1px}
 .mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
-
-/* ── 셸 ── */
 #app{display:flex;flex-direction:column;height:100dvh;max-width:640px;margin:0 auto;position:relative}
 .scroll{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch}
-
 .top{display:flex;align-items:baseline;justify-content:space-between;padding:calc(env(safe-area-inset-top) + 13px) var(--pad) 7px;flex-shrink:0}
 .brand{font-family:var(--mono);font-size:12.5px;letter-spacing:.06em;color:var(--dim)}
 .today{font-family:var(--mono);font-size:11.5px;letter-spacing:.05em;color:var(--dim)}
-
+.sync{font-family:var(--mono);font-size:10.5px;color:var(--faint);margin-left:8px;letter-spacing:.02em}
 .cmd{padding:0 var(--pad) 11px;font-family:var(--mono);font-size:12px;color:var(--dim);flex-shrink:0}
 .cmd b{color:var(--accent);font-weight:500}
 .caret{display:inline-block;width:7px;height:12px;background:var(--accent);vertical-align:-2px;margin-left:3px;animation:blink 1.06s step-end infinite}
 @keyframes blink{0%,49%{opacity:1}50%,100%{opacity:0}}
-
 .tabsel{display:flex;padding:0 var(--pad) 11px;flex-shrink:0;border-bottom:1px solid var(--rule)}
 .tabsel button{
   font-family:var(--mono);font-size:11.5px;letter-spacing:.02em;color:var(--dim);
   padding:3px 10px;border:1px solid var(--rule);margin-right:-1px;transition:color .16s,background .16s,border-color .16s;
 }
 .tabsel button[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:#000;font-weight:600}
-
-/* ── 목록 ── */
 .row{display:grid;grid-template-columns:28px 1fr auto;gap:9px;padding:11px var(--pad);border-bottom:1px solid var(--rule-soft);align-items:baseline;animation:rowin .26s ease both}
 @keyframes rowin{from{opacity:0;transform:translateX(-7px)}to{opacity:1;transform:none}}
 .row .box{font-family:var(--mono);font-size:13px;color:var(--dim);text-align:left;transition:color .18s;line-height:1.45}
@@ -89,6 +67,9 @@ input:focus,select:focus,textarea:focus{outline:1px solid var(--accent);outline-
 .row.done .ttl{color:var(--faint);text-decoration:line-through}
 .row .meta{font-family:var(--mono);font-size:10.5px;color:var(--dim);margin-top:3px;letter-spacing:.02em}
 .row .meta .sep{color:var(--faint);margin:0 5px}
+.cat{display:inline-block;width:6px;height:6px;margin-right:6px;vertical-align:1px;background:var(--work)}
+.cat.life{background:var(--life)}
+.row.done .cat{opacity:.4}
 .row .note{
   font-size:11.5px;color:var(--faint);margin-top:5px;line-height:1.45;
   padding-left:8px;border-left:1px solid var(--rule);
@@ -99,16 +80,12 @@ input:focus,select:focus,textarea:focus{outline:1px solid var(--accent);outline-
 .row .d.hot{color:var(--accent)}
 .row .d.over{color:var(--accent);font-weight:600}
 .row .body[role="button"]{cursor:pointer}
-
 .empty{padding:44px var(--pad);text-align:center;color:var(--faint);font-family:var(--mono);font-size:12px;line-height:1.9}
 .empty b{display:block;color:var(--dim);font-weight:400;margin-bottom:6px}
-
-/* ── 하단 탭 ── */
 .tabs{display:flex;border-top:1px solid var(--rule);flex-shrink:0;padding-bottom:env(safe-area-inset-bottom)}
 .tabs button{flex:1;padding:12px 0;font-family:var(--mono);font-size:11px;letter-spacing:.08em;color:var(--dim);border-right:1px solid var(--rule)}
 .tabs button:last-child{border-right:0}
 .tabs button[aria-current="page"]{color:var(--accent)}
-
 .fab{
   position:absolute;right:16px;bottom:calc(env(safe-area-inset-bottom) + 62px);
   width:46px;height:46px;border:1px solid var(--accent);color:var(--accent);background:var(--bg);
@@ -116,18 +93,12 @@ input:focus,select:focus,textarea:focus{outline:1px solid var(--accent);outline-
   transition:background .18s,color .18s;z-index:5;
 }
 .fab:hover{background:var(--accent);color:#000}
-
-/* ── 상태 배너 ── */
 .banner{
   font-family:var(--mono);font-size:11px;padding:8px var(--pad);flex-shrink:0;
   border-bottom:1px solid var(--rule);display:flex;gap:9px;align-items:center;
 }
 .banner.warn{color:var(--accent)}
 .banner button{font-family:var(--mono);font-size:11px;color:var(--accent);text-decoration:underline;margin-left:auto}
-
-/* ── 입력 화면 ──
-   하단 시트가 아니라 온전한 한 화면이다. 시트로 띄우면 위쪽이 빈 채로 남고,
-   그 빈 자리가 아래 탭 막대까지 덮어 눌러도 반응하지 않았다. */
 .sheet{position:fixed;inset:0;background:var(--bg);z-index:50;display:flex;align-items:stretch;justify-content:center;animation:fade .18s ease}
 @keyframes fade{from{opacity:0}to{opacity:1}}
 .sheet-in{
@@ -144,8 +115,6 @@ input:focus,select:focus,textarea:focus{outline:1px solid var(--accent);outline-
 }
 .sheet-hd h2{margin:0;font-family:var(--mono);font-size:12.5px;font-weight:500;letter-spacing:.06em;color:var(--accent)}
 .sheet-hd button{font-family:var(--mono);font-size:11.5px;color:var(--dim)}
-
-/* 무엇을 만들지 먼저 고른다 */
 .seg{display:flex;margin-bottom:17px}
 .seg button{
   flex:1;font-family:var(--mono);font-size:12px;padding:9px 0;
@@ -160,8 +129,6 @@ input:focus,select:focus,textarea:focus{outline:1px solid var(--accent);outline-
   font-family:var(--mono);font-size:11.5px;padding:7px 13px;border:1px solid var(--rule);
   color:var(--dim);margin-right:-1px;margin-bottom:-1px;transition:background .16s,color .16s,border-color .16s;
 }
-/* 고른 것은 테두리와 글자로만 말한다 — 앰버 채움은 화면에 하나(필터 탭)만 둔다.
-   한 화면에 채움이 여럿이면 무엇이 중요한지가 흩어진다. */
 .pick button[aria-pressed="true"]{border-color:var(--accent);color:var(--accent);font-weight:600;position:relative;z-index:1}
 .duo{display:grid;grid-template-columns:1fr 1fr;gap:9px}
 .actions{display:flex;gap:9px;margin-top:17px}
@@ -170,8 +137,6 @@ input:focus,select:focus,textarea:focus{outline:1px solid var(--accent);outline-
 .actions button.go:hover{background:var(--accent);color:#000}
 .actions button.danger{color:var(--accent)}
 .hintline{font-family:var(--mono);font-size:10.5px;color:var(--faint);margin-top:8px;line-height:1.7}
-
-/* ── 달력 ── */
 .calhd{display:flex;align-items:center;justify-content:space-between;padding:12px var(--pad) 10px}
 .calhd .ym{font-family:var(--mono);font-size:14px;letter-spacing:.03em}
 .calhd button{font-family:var(--mono);font-size:15px;color:var(--dim);padding:2px 11px;border:1px solid var(--rule)}
@@ -188,12 +153,16 @@ input:focus,select:focus,textarea:focus{outline:1px solid var(--accent);outline-
 .cell.today{color:var(--accent)}
 .cell[aria-pressed="true"]{background:var(--rule)}
 .cell .dots{display:flex;gap:2px;height:4px}
-.cell .dots i{width:4px;height:4px;background:var(--dim);display:block}
-.cell .dots i.hot{background:var(--accent)}
+.cell .dots i{width:4px;height:4px;background:var(--work);display:block}
+.cell .dots i.life{background:var(--life)}
+.cell .dots i.done{background:var(--faint)}
+.cell .num.hot{text-decoration:underline;text-decoration-color:var(--accent);text-underline-offset:3px;text-decoration-thickness:1px}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;padding:9px var(--pad);font-family:var(--mono);font-size:10.5px;color:var(--dim);border-bottom:1px solid var(--rule)}
+.legend i{display:inline-block;width:6px;height:6px;margin-right:6px;vertical-align:1px;background:var(--work)}
+.legend i.life{background:var(--life)}
+.legend u{text-decoration-color:var(--accent);text-underline-offset:3px}
 .daylist{border-top:1px solid var(--rule);padding-top:4px}
 .daylist .hd{font-family:var(--mono);font-size:11px;color:var(--dim);padding:9px var(--pad) 4px;letter-spacing:.04em}
-
-/* ── 설정 ── */
 .sect{padding:16px var(--pad) 6px;font-family:var(--mono);font-size:10.5px;letter-spacing:.11em;color:var(--faint)}
 .sect-row{display:flex;align-items:center;justify-content:space-between;padding:16px var(--pad) 8px;border-bottom:1px solid var(--rule)}
 .sect-row .sect{padding:0}
@@ -206,24 +175,21 @@ input:focus,select:focus,textarea:focus{outline:1px solid var(--accent);outline-
 .line .name{font-size:13.5px}
 .line .sub{font-family:var(--mono);font-size:10.5px;color:var(--dim);margin-top:2px}
 .line .sub .sep{color:var(--faint)}
+.line .sub.bad{color:var(--accent);word-break:break-all}
 .line .pnote{font-size:11.5px;color:var(--faint);margin-top:4px;padding-left:8px;border-left:1px solid var(--rule);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .line .chev{font-size:11px;color:var(--dim);flex-shrink:0}
 .line button.act{font-family:var(--mono);font-size:11px;color:var(--accent);border:1px solid var(--rule);padding:5px 10px}
 .warnbox{border:1px solid var(--accent);color:var(--accent);font-family:var(--mono);font-size:11.5px;line-height:1.7;padding:11px 13px;margin-top:6px}
-
-/* ── 로그인 ── */
 .login{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100dvh;gap:16px;padding:22px}
 .login .logo{font-family:var(--mono);font-size:15px;letter-spacing:.16em;color:var(--accent)}
 .login .say{font-family:var(--mono);font-size:11.5px;color:var(--dim);text-align:center;line-height:1.9}
 .login .err{font-family:var(--mono);font-size:11.5px;color:var(--accent);text-align:center;max-width:280px}
-
 .toast{
   position:fixed;left:50%;transform:translateX(-50%);bottom:calc(env(safe-area-inset-bottom) + 78px);
   background:var(--bg);border:1px solid var(--accent);color:var(--accent);
   font-family:var(--mono);font-size:11.5px;padding:9px 15px;z-index:60;max-width:90vw;
   animation:fade .2s ease;
 }
-
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important}
 }
@@ -239,16 +205,13 @@ var h = htmPreact;
 var html = h.html, render = h.render;
 var useState = h.useState, useEffect = h.useEffect, useRef = h.useRef, useMemo = h.useMemo, useCallback = h.useCallback;
 
-// ══════════════════════════════════════════════════════════════
-// 설정
-// ══════════════════════════════════════════════════════════════
 var APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw7JLmbKqOmxzeysBpy-8IdZ3xyTliQzHZ7QqgkUcvABKSLCy80rj2F3XNRMpdqqUX3_A/exec";
 var GOOGLE_CLIENT_ID = "457529892194-utbnqihap22pf00a4t71tq27e6gedp92.apps.googleusercontent.com";
-var SYNC_MS = 30000;          // 다른 기기의 변경을 받아오는 주기
-var SOON_DAYS = 3;            // 「기한임박」 기준 — 사용자 확정값(SYS-217)
+var SYNC_MS = 30000;
+var SOON_DAYS = 3;
 var TOKEN_KEY = "taskboard_session_token";
 
-var STATUS = ["우선", "추후"];          // 등록 시 분류 (기본값은 첫 항목)
+var STATUS = ["우선", "추후"];
 var CATS = ["업무", "생활"];
 var FILTERS = ["진행중", "기한임박", "전체"];
 var REPEATS = [
@@ -257,9 +220,6 @@ var REPEATS = [
 ];
 var DOW = ["일", "월", "화", "수", "목", "금", "토"];
 
-// ══════════════════════════════════════════════════════════════
-// 날짜 헬퍼
-// ══════════════════════════════════════════════════════════════
 function pad2(n) { return n < 10 ? "0" + n : "" + n; }
 function fmtD(d) { return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()); }
 function today() { var n = new Date(); return fmtD(n); }
@@ -267,7 +227,6 @@ function parseDay(s) {
   var p = String(s).split("T")[0].split("-");
   return new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
 }
-// 남은 날수 — 오늘 0, 지났으면 음수
 function daysLeft(due) {
   if (!due) return null;
   return Math.round((parseDay(due) - parseDay(today())) / 86400000);
@@ -282,26 +241,12 @@ function dueLabel(due) {
 }
 function uid() { return Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-3); }
 
-// ══════════════════════════════════════════════════════════════
-// 반복 일정
-//
-// 여기는 함정이 많은 자리라 규칙을 먼저 적어 둔다.
-//   ① 그 달에 없는 날짜는 말일로 당긴다. 1월 31일의 다음 달은 2월 28일이지 3월 31일이 아니다.
-//      종전 구현은 setMonth(+1) 뒤 setDate(31)을 불러 2월을 통째로 건너뛰었다 — 매월이 격월이 됐다.
-//   ② 기준 날짜(며칠·몇 월며칠)는 recurrencePattern에 붙들어 둔다. 그래야 2월에 28일로 당겨져도
-//      3월에 다시 31일로 돌아온다.
-//   ③ 다음 회차는 「오늘을 지날 때까지」 나아간다. 며칠 앱을 안 열어 마감이 밀렸을 때
-//      한 번 눌러 하루만 가면 여전히 지난 날짜다(8일 방치 시 여덟 번을 눌러야 했다).
-// ══════════════════════════════════════════════════════════════
-
-// 그 달에 없는 날은 말일로 당긴다. mIdx가 12여도 다음 해 1월로 알아서 정규화된다.
 function atDay(y, mIdx, day) {
   var base = new Date(y, mIdx, 1);
   var last = new Date(base.getFullYear(), base.getMonth() + 1, 0).getDate();
   return new Date(base.getFullYear(), base.getMonth(), Math.min(day, last));
 }
 
-// 한 회차만 앞으로
 function stepOnce(cur, t) {
   var pat = t.recurrencePattern || {};
   var d = new Date(cur);
@@ -315,7 +260,7 @@ function stepOnce(cur, t) {
         c.setDate(c.getDate() + i);
         if (wd.indexOf(c.getDay()) !== -1) return c;
       }
-      d.setDate(d.getDate() + 7); return d;      // 요일을 안 골랐으면 그냥 한 주 뒤
+      d.setDate(d.getDate() + 7); return d;
     case "monthly":  return atDay(cur.getFullYear(), cur.getMonth() + 1, pat.monthday || cur.getDate());
     case "yearly":   return atDay(cur.getFullYear() + 1, cur.getMonth(), pat.monthday || cur.getDate());
     default: return null;
@@ -327,19 +272,16 @@ function nextRepeat(t) {
   var td = today();
   var next = stepOnce(parseDay(t.due), t);
   var guard = 0;
-  while (next && fmtD(next) <= td && guard < 2000) {   // 오늘을 지날 때까지 따라잡는다
+  while (next && fmtD(next) <= td && guard < 2000) {
     next = stepOnce(next, t);
     guard++;
   }
   if (!next) return null;
   var s = fmtD(next);
-  if (t.recurrenceEndDate && s > t.recurrenceEndDate) return null;   // 반복 종료일을 넘으면 여기서 끝
+  if (t.recurrenceEndDate && s > t.recurrenceEndDate) return null;
   return s;
 }
 
-// ══════════════════════════════════════════════════════════════
-// 통신
-// ══════════════════════════════════════════════════════════════
 function getToken() { try { return localStorage.getItem(TOKEN_KEY); } catch (e) { return null; } }
 function setToken(t) {
   try { if (t) localStorage.setItem(TOKEN_KEY, t); else localStorage.removeItem(TOKEN_KEY); } catch (e) {}
@@ -360,8 +302,6 @@ function cloudGetAll() {
 
 function cloudPost(payload) {
   var token = getToken();
-  // Content-Type을 text/plain으로 두는 이유: Apps Script는 CORS preflight(OPTIONS)를
-  // 처리하지 않으므로 simple request로 보내야 브라우저가 막지 않는다.
   var body = {};
   for (var k in payload) body[k] = payload[k];
   body.token = token;
@@ -377,9 +317,67 @@ function cloudPost(payload) {
 
 function isAuthError(e) { return String(e && e.message).indexOf("unauthorized") !== -1; }
 
-// ══════════════════════════════════════════════════════════════
-// 기존 데이터 이관 — 구 상태 4종 → 신 2종
-// ══════════════════════════════════════════════════════════════
+var MERGE_KEYS = ["tmv3_tasks", "tmv3_proj"];
+var PENDING_KEY = "taskboard_pending_v1";
+
+function emptyPending() { return { tmv3_tasks: { up: {}, rm: {} }, tmv3_proj: { up: {}, rm: {} } }; }
+function loadPending() {
+  var p = emptyPending();
+  try {
+    var raw = JSON.parse(localStorage.getItem(PENDING_KEY) || "null");
+    MERGE_KEYS.forEach(function (k) {
+      if (raw && raw[k] && raw[k].up && raw[k].rm) p[k] = raw[k];
+    });
+  } catch (e) {}
+  return p;
+}
+function storePending(p) { try { localStorage.setItem(PENDING_KEY, JSON.stringify(p)); } catch (e) {} }
+function isEmptyPending(pk) { return !pk || (!Object.keys(pk.up).length && !Object.keys(pk.rm).length); }
+
+function queueDiff(pk, prev, next) {
+  var before = {};
+  (prev || []).forEach(function (it) { before[it.id] = it; });
+  var after = {};
+  (next || []).forEach(function (it) {
+    after[it.id] = true;
+    var b = before[it.id];
+    if (!b || JSON.stringify(b) !== JSON.stringify(it)) {
+      pk.up[it.id] = it;
+      delete pk.rm[it.id];
+    }
+  });
+  Object.keys(before).forEach(function (id) {
+    if (after[id]) return;
+    pk.rm[id] = true;
+    delete pk.up[id];
+  });
+}
+
+function rebase(base, pk) {
+  var out = [];
+  var seen = {};
+  (base || []).forEach(function (it) {
+    if (!it || !it.id) return;
+    seen[it.id] = true;
+    if (pk && pk.rm[it.id]) return;
+    out.push(pk && pk.up[it.id] ? pk.up[it.id] : it);
+  });
+  if (pk) Object.keys(pk.up).forEach(function (id) { if (!seen[id]) out.push(pk.up[id]); });
+  return out;
+}
+
+function parseList(s) {
+  try { var v = JSON.parse(s || "[]"); return Array.isArray(v) ? v : []; } catch (e) { return []; }
+}
+
+function agoLabel(ms) {
+  if (!ms) return "";
+  var m = Math.floor((Date.now() - ms) / 60000);
+  if (m < 1) return "방금 동기화";
+  if (m < 60) return "동기화 " + m + "분 전";
+  return "동기화 " + Math.floor(m / 60) + "시간 전";
+}
+
 function migrateTask(t) {
   var s = t.status;
   var next = (s === "추후업무" || s === "추후") ? "추후" : "우선";
@@ -405,15 +403,13 @@ function migrateProj(p) {
     id: p.id || uid(),
     name: p.name || "",
     category: p.category === "LIFE" || p.category === "생활" ? "생활" : "업무",
+    catSet: !!p.catSet,
     start: p.start || "",
     deadline: p.deadline || "",
     note: p.notes || p.note || ""
   };
 }
 
-// ══════════════════════════════════════════════════════════════
-// 로그인
-// ══════════════════════════════════════════════════════════════
 var LOGIN_ERR = {
   not_allowed: "이 계정은 등록돼 있지 않습니다",
   invalid_token: "로그인 정보를 확인하지 못했습니다",
@@ -465,9 +461,6 @@ function Login(props) {
     </div>`;
 }
 
-// ══════════════════════════════════════════════════════════════
-// 할 일 한 줄
-// ══════════════════════════════════════════════════════════════
 function Row(props) {
   var t = props.task;
   var n = daysLeft(t.due);
@@ -486,16 +479,13 @@ function Row(props) {
            onClick=${function () { props.onOpen(t); }}
            onKeyDown=${function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); props.onOpen(t); } }}>
         <div class="ttl">${t.title}</div>
-        <div class="meta">${projName || t.category}<span class="sep">·</span>${t.status}${t.recurrence && t.recurrence !== "none" ? html`<span class="sep">·</span>반복` : null}</div>
+        <div class="meta"><i class=${"cat" + (t.category === "생활" ? " life" : "")} title=${t.category}></i>${projName || t.category}<span class="sep">·</span>${t.status}${t.recurrence && t.recurrence !== "none" ? html`<span class="sep">·</span>반복` : null}</div>
         ${t.note ? html`<div class="note">${t.note.split("\n")[0]}</div>` : null}
       </div>
       <span class=${cls}>${dueLabel(t.due)}</span>
     </div>`;
 }
 
-// ══════════════════════════════════════════════════════════════
-// 달력
-// ══════════════════════════════════════════════════════════════
 function Calendar(props) {
   var tasks = props.tasks;
   var st = useState(function () { var d = new Date(); return { y: d.getFullYear(), m: d.getMonth() }; });
@@ -515,7 +505,6 @@ function Calendar(props) {
     return out;
   }, [ym.y, ym.m]);
 
-  // 그 날에 걸치는 할 일 (시작~마감 구간)
   function onDay(ds) {
     return tasks.filter(function (t) {
       if (!t.due) return false;
@@ -548,12 +537,19 @@ function Calendar(props) {
             <button class=${"cell" + (c.out ? " out" : "") + (c.ds === today() ? " today" : "")}
                     aria-pressed=${c.ds === sel ? "true" : "false"}
                     onClick=${function () { setSel(c.ds); }}>
-              <span>${Number(c.ds.slice(8))}</span>
+              <span class=${"num" + (hot ? " hot" : "")}>${Number(c.ds.slice(8))}</span>
               <span class="dots">
-                ${list.slice(0, 3).map(function (t, i) { return html`<i class=${hot && i === 0 ? "hot" : ""}></i>`; })}
+                ${list.slice(0, 3).map(function (t) {
+                  return html`<i class=${t.done ? "done" : t.category === "생활" ? "life" : ""}></i>`;
+                })}
               </span>
             </button>`;
         })}
+      </div>
+      <div class="legend">
+        <span><i></i>업무</span>
+        <span><i class="life"></i>생활</span>
+        <span><u>밑줄</u> ${SOON_DAYS}일 안 마감</span>
       </div>
       <div class="daylist">
         <div class="hd mono">${sel} · ${selTasks.length}건</div>
@@ -567,10 +563,6 @@ function Calendar(props) {
     </div>`;
 }
 
-// ══════════════════════════════════════════════════════════════
-// 할 일 편집 시트
-// ══════════════════════════════════════════════════════════════
-// 반복 규칙을 사람 말로 되읽어 준다. 「매주」만 눌린 채 무슨 요일인지 모르고 쓰는 일을 막는다.
 function repeatSay(f) {
   if (!f.due) return "마감일을 정해야 반복이 돕니다.";
   var base = parseDay(f.due);
@@ -595,14 +587,12 @@ function repeatSay(f) {
 function AddSheet(props) {
   var editTask = props.task || null;
   var editProj = props.proj || null;
-  // 고치는 중이면 갈아탈 수 없다 — 무엇을 고치는지가 이미 정해져 있다
   var locked = editTask ? "task" : editProj ? "proj" : null;
 
   var m0 = useState(locked || props.initMode || "task"); var mode = m0[0], setMode = m0[1];
   var c0 = useState(false); var confirming = c0[0], setConfirming = c0[1];
   var firstRef = useRef(null);
 
-  // ── 할 일 폼 ──────────────────────────────────────────────
   var t0 = useState(function () {
     var i = editTask;
     return {
@@ -623,11 +613,11 @@ function AddSheet(props) {
   var tf = t0[0], setTf = t0[1];
   function upT(k, v) { setTf(function (p) { var n = {}; for (var x in p) n[x] = p[x]; n[k] = v; return n; }); }
 
-  // ── 프로젝트 폼 ───────────────────────────────────────────
   var p0 = useState(function () {
     var i = editProj;
     return {
       name: i ? i.name : "",
+      category: i ? (i.category || "업무") : "업무",
       start: i ? (i.start || "") : "",
       deadline: i ? (i.deadline || "") : "",
       note: i ? (i.note || "") : ""
@@ -636,13 +626,11 @@ function AddSheet(props) {
   var pf = p0[0], setPf = p0[1];
   function upP(k, v) { setPf(function (p) { var n = {}; for (var x in p) n[x] = p[x]; n[k] = v; return n; }); }
 
-  // 시트가 올라오는 동안 focus를 주면 브라우저가 무시한다 — 다 올라온 뒤에 준다
   useEffect(function () {
     var id = setTimeout(function () { if (firstRef.current) firstRef.current.focus(); }, 280);
     return function () { clearTimeout(id); };
   }, [mode]);
 
-  // 반복을 고르는 순간 기준을 정해 둔다 — 매주는 마감일의 요일, 매월·매년은 마감일의 날짜.
   function pickRepeat(v) {
     setTf(function (p) {
       var n = {}; for (var x in p) n[x] = p[x];
@@ -684,7 +672,18 @@ function AddSheet(props) {
     props.onSaveProj({
       id: editProj ? editProj.id : null,
       name: name, start: pf.start, deadline: pf.deadline, note: pf.note,
-      category: editProj ? editProj.category : "업무"
+      category: pf.category
+    });
+  }
+
+  function pickProj(pid) {
+    var p = null;
+    for (var i = 0; i < props.projects.length; i++) if (props.projects[i].id === pid) p = props.projects[i];
+    setTf(function (prev) {
+      var n = {}; for (var x in prev) n[x] = prev[x];
+      n.pid = pid;
+      if (p && p.catSet) n.category = p.category;
+      return n;
     });
   }
 
@@ -736,7 +735,7 @@ function AddSheet(props) {
 
           <div class="field">
             <label for="tb-proj">프로젝트</label>
-            <select id="tb-proj" value=${tf.pid} onChange=${function (e) { upT("pid", e.target.value); }}>
+            <select id="tb-proj" value=${tf.pid} onChange=${function (e) { pickProj(e.target.value); }}>
               <option value="">없음</option>
               ${props.projects.map(function (p) { return html`<option value=${p.id}>${p.name}</option>`; })}
             </select>
@@ -804,6 +803,17 @@ function AddSheet(props) {
                    onKeyDown=${function (e) { if (e.key === "Enter") submitProj(); }} />
           </div>
 
+          <div class="field">
+            <label>업무 · 생활</label>
+            <div class="pick">
+              ${CATS.map(function (c) {
+                return html`<button aria-pressed=${pf.category === c ? "true" : "false"}
+                                    onClick=${function () { upP("category", c); }}>${c}</button>`;
+              })}
+            </div>
+            <div class="hintline">이 프로젝트에 붙이는 할 일이 이 분류를 따릅니다.</div>
+          </div>
+
           <div class="field duo">
             <div>
               <label for="pj-s">시작</label>
@@ -840,8 +850,6 @@ function AddSheet(props) {
     </div>`;
 }
 
-// 설정 — 하단 시트가 아니라 온전한 한 화면이다.
-// 종전에는 시트로 떠서 위쪽 절반이 빈 채로 남았고, 프로젝트를 만들 자리도 없었다.
 function ConfigView(props) {
   return html`
     <div>
@@ -864,7 +872,7 @@ function ConfigView(props) {
                    onClick=${function () { props.onEditProj(p); }}
                    onKeyDown=${function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); props.onEditProj(p); } }}>
                 <div class="grow">
-                  <div class="name">${p.name}</div>
+                  <div class="name">${p.catSet ? html`<i class=${"cat" + (p.category === "생활" ? " life" : "")} title=${p.category}></i>` : null}${p.name}</div>
                   <div class="sub">
                     할 일 ${mine.length}건${open ? " (진행 " + open + ")" : ""}
                     ${p.start || p.deadline ? html`<span class="sep"> · </span>${(p.start || "") + (p.start && p.deadline ? " ~ " : "") + (p.deadline || (p.start ? " ~" : ""))}` : null}
@@ -879,7 +887,8 @@ function ConfigView(props) {
       <div class="line">
         <div class="grow">
           <div class="name">마감일을 캘린더로 보내기</div>
-          <div class="sub">마감이 있는 할 일만 종일 일정으로 올립니다</div>
+          <div class="sub">마감이 있는 할 일만 종일 일정으로 올립니다. 업무는 노란색, 생활은 청록색입니다.</div>
+          ${props.gcalNote ? html`<div class=${"sub" + (props.gcalNote.bad ? " bad" : "")}>${props.gcalNote.text}</div>` : null}
         </div>
         <button class="act" disabled=${props.gcalBusy}
                 onClick=${props.onGcal}>${props.gcalBusy ? "보내는 중" : "보내기"}</button>
@@ -903,30 +912,25 @@ function ConfigView(props) {
       </div>
 
       <div class="hintline" style="padding:16px var(--pad) 26px">
-        자료는 구글 스프레드시트에 저장됩니다. 연결이 끊긴 동안에는 아무것도 저장하지 않고,
-        다시 이어지면 마지막 변경을 자동으로 올립니다.
+        자료는 구글 스프레드시트에 저장됩니다. 연결이 끊긴 동안 고친 것은 이 기기에 남겨 두었다가
+        다시 이어지면 올립니다. 두 기기가 같은 할 일을 고치면 나중에 올라간 쪽이 남습니다.
       </div>
     </div>`;
 }
 
-// ══════════════════════════════════════════════════════════════
-// 본체
-// ══════════════════════════════════════════════════════════════
 function App() {
   var a0 = useState(function () { return !!getToken(); }); var authed = a0[0], setAuthed = a0[1];
 
-  // hydrated — 서버에서 자료를 「한 번이라도」 받았는가.
-  // 이 값이 false인 동안 저장 함수는 전부 즉시 반환한다. 데이터 안전의 핵심 자물쇠다.
   var hydRef = useRef(false);
   var h0 = useState(false); var hydrated = h0[0], setHydrated = h0[1];
 
-  var l0 = useState("loading"); var phase = l0[0], setPhase = l0[1];  // loading | ready | offline
+  var l0 = useState("loading"); var phase = l0[0], setPhase = l0[1];
   var p0 = useState([]); var projects = p0[0], setProjects = p0[1];
   var t0 = useState([]); var tasks = t0[0], setTasks = t0[1];
 
   var f0 = useState(FILTERS[0]); var filter = f0[0], setFilter = f0[1];
-  var v0 = useState("tasks"); var view = v0[0], setView = v0[1];
-  var s0 = useState(null); var sheet = s0[0], setSheet = s0[1];       // null | {task} | "new" | "settings"
+  var v0 = useState("calendar"); var view = v0[0], setView = v0[1];
+  var s0 = useState(null); var sheet = s0[0], setSheet = s0[1];
   var g0 = useState(false); var gcalBusy = g0[0], setGcalBusy = g0[1];
   var e0 = useState(""); var saveErr = e0[0], setSaveErr = e0[1];
   var m0 = useState(null); var toast = m0[0], setToast = m0[1];
@@ -935,9 +939,15 @@ function App() {
     return ("Notification" in window) ? Notification.permission : "unsupported";
   }); var notifyState = n0[0], setNotifyState = n0[1];
 
-  var stampRef = useRef({});      // 키별 updatedAt — 폴링 비교용
-  var pendingRef = useRef({});    // 저장 실패분 — 연결 복구 시 재전송
-  var notifiedRef = useRef({});   // 알림 중복 방지
+  var y0 = useState(0); var lastSync = y0[0], setLastSync = y0[1];
+  var w0 = useState(0); var setTick = w0[1];
+  var q0 = useState(null); var gcalNote = q0[0], setGcalNote = q0[1];
+
+  var stampRef = useRef({});
+  var baseRef = useRef({ tmv3_tasks: [], tmv3_proj: [] });
+  var pendingRef = useRef(loadPending());
+  var inflightRef = useRef({});
+  var notifiedRef = useRef({});
 
   function say(msg) {
     setToast(msg);
@@ -946,6 +956,8 @@ function App() {
 
   function forceLogout() {
     setToken(null);
+    pendingRef.current = emptyPending();
+    storePending(pendingRef.current);
     hydRef.current = false;
     setHydrated(false);
     setAuthed(false);
@@ -953,123 +965,107 @@ function App() {
     setProjects([]); setTasks([]);
   }
 
-  // ── 저장 ──────────────────────────────────────────────────
-  // ⛔ 이 함수가 서버로 나가는 유일한 통로다. hydrated 자물쇠를 여기 한 곳에서만 건다.
-  function push(key, value) {
-    if (!hydRef.current) return;              // ← 자물쇠. 받은 적 없으면 절대 안 보낸다
-    var json = JSON.stringify(value);
-    pendingRef.current[key] = json;
-    cloudPost({ action: "set", key: key, value: json })
-      .then(function (r) {
-        if (!r.ok) throw new Error(r.error || "저장하지 못했습니다");
-        stampRef.current[key] = r.updatedAt;
-        if (pendingRef.current[key] === json) delete pendingRef.current[key];
-        setSaveErr("");
-      })
-      .catch(function (e) {
-        if (isAuthError(e)) { forceLogout(); return; }
-        setSaveErr("저장하지 못했습니다 — 연결되면 다시 올립니다");
-      });
+  function push(key, next, prev) {
+    if (!hydRef.current) return;
+    queueDiff(pendingRef.current[key], prev, next);
+    storePending(pendingRef.current);
+    flushPending();
   }
-  function saveTasks(next) { push("tmv3_tasks", next); }
-  function saveProjects(next) { push("tmv3_proj", next); }
+  function saveTasks(next, prev) { push("tmv3_tasks", next, prev); }
+  function saveProjects(next, prev) { push("tmv3_proj", next, prev); }
 
-  // 실패분 재전송
+  function settle(key) {
+    var list = rebase(baseRef.current[key], pendingRef.current[key]);
+    if (key === "tmv3_tasks") setTasks(list.map(migrateTask));
+    else setProjects(list.map(migrateProj));
+  }
+
   function flushPending() {
-    var keys = Object.keys(pendingRef.current);
-    if (!keys.length) return;
-    keys.forEach(function (key) {
-      var json = pendingRef.current[key];
-      cloudPost({ action: "set", key: key, value: json })
+    if (!hydRef.current) return;
+    MERGE_KEYS.forEach(function (key) {
+      var pk = pendingRef.current[key];
+      if (inflightRef.current[key] || isEmptyPending(pk)) return;
+      var sentUp = {}; for (var id in pk.up) sentUp[id] = JSON.stringify(pk.up[id]);
+      var sentRm = Object.keys(pk.rm);
+      var upsert = Object.keys(pk.up).map(function (k) { return pk.up[k]; });
+      inflightRef.current[key] = true;
+      cloudPost({ action: "merge", key: key, upsert: upsert, remove: sentRm })
         .then(function (r) {
-          if (!r.ok) return;
+          inflightRef.current[key] = false;
+          if (!r.ok) throw new Error(r.error || "저장하지 못했습니다");
+          var cur = pendingRef.current[key];
+          for (var sid in sentUp) if (cur.up[sid] && JSON.stringify(cur.up[sid]) === sentUp[sid]) delete cur.up[sid];
+          sentRm.forEach(function (rid) { delete cur.rm[rid]; });
+          storePending(pendingRef.current);
+          baseRef.current[key] = parseList(r.value);
           stampRef.current[key] = r.updatedAt;
-          if (pendingRef.current[key] === json) delete pendingRef.current[key];
-          if (!Object.keys(pendingRef.current).length) { setSaveErr(""); say("밀린 변경을 올렸습니다"); }
+          settle(key);
+          setSaveErr("");
+          setLastSync(Date.now());
+          if (!isEmptyPending(cur)) flushPending();
         })
-        .catch(function () {});
+        .catch(function (e) {
+          inflightRef.current[key] = false;
+          if (isAuthError(e)) { forceLogout(); return; }
+          setSaveErr(e && e.message === "busy"
+            ? "서버가 바빠서 저장을 미뤘습니다. 곧 다시 올립니다."
+            : "저장하지 못했습니다. 이 기기에 남겨 두었다가 연결되면 올립니다.");
+        });
     });
   }
 
-  // ── 적재 ──────────────────────────────────────────────────
-  // 서버 응답을 화면에 앉히는 유일한 자리. 자물쇠도 여기서만 열린다.
   function adopt(all) {
-    var pr = all.tmv3_proj && all.tmv3_proj.value ? JSON.parse(all.tmv3_proj.value) : [];
-    var tk = all.tmv3_tasks && all.tmv3_tasks.value ? JSON.parse(all.tmv3_tasks.value) : [];
-    stampRef.current.tmv3_proj = all.tmv3_proj ? all.tmv3_proj.updatedAt : null;
-    stampRef.current.tmv3_tasks = all.tmv3_tasks ? all.tmv3_tasks.updatedAt : null;
-    setProjects(pr.map(migrateProj));
-    setTasks(tk.map(migrateTask));
+    MERGE_KEYS.forEach(function (key) {
+      var cell = all[key];
+      var changed = !hydRef.current || (cell && cell.updatedAt && cell.updatedAt !== stampRef.current[key]);
+      if (!changed) return;
+      baseRef.current[key] = cell && cell.value ? parseList(cell.value) : [];
+      stampRef.current[key] = cell ? cell.updatedAt : null;
+      settle(key);
+    });
     hydRef.current = true;
     setHydrated(true);
     setPhase("ready");
+    setLinkLost(false);
+    setLastSync(Date.now());
   }
 
   function load() {
-    setPhase(hydRef.current ? "ready" : "loading");
+    if (!hydRef.current) setPhase("loading");
     return cloudGetAll()
       .then(function (all) {
         adopt(all);
-        setLinkLost(false);
         flushPending();
       })
       .catch(function (e) {
         if (isAuthError(e)) { forceLogout(); return; }
-        // ⛔ 견본 데이터를 채우지 않는다. 없는 자료를 지어내면 그것이 원본을 덮는다.
-        setPhase("offline");
+        if (hydRef.current) setLinkLost(true); else setPhase("offline");
       });
   }
 
   useEffect(function () {
     if (!authed) return;
-    var dead = false;
-    cloudGetAll()
-      .then(function (all) {
-        if (dead) return;
-        adopt(all);
-        setLinkLost(false);
-      })
-      .catch(function (e) {
-        if (dead) return;
-        if (isAuthError(e)) { forceLogout(); return; }
-        setPhase("offline");
-      });
-    return function () { dead = true; };
+    load();
   }, [authed]);
 
-  // ── 주기 동기화 ───────────────────────────────────────────
-  // 한 번 자료를 받은 뒤에는 연결이 끊겨도 목록을 감추지 않는다.
-  // 손에 든 것은 서버에서 온 진짜 자료이므로 계속 보여주고, 저장만 미뤄 뒀다 올린다.
   useEffect(function () {
     if (!authed) return;
     var iv = setInterval(function () {
-      cloudGetAll()
-        .then(function (all) {
-          setLinkLost(false);
-          if (!hydRef.current) { adopt(all); flushPending(); return; }
-
-          // 아직 못 올린 변경이 있으면 서버 것을 받지 않는다 — 받으면 내 변경이 되감긴다.
-          if (Object.keys(pendingRef.current).length) { flushPending(); return; }
-
-          if (all.tmv3_proj && all.tmv3_proj.updatedAt && all.tmv3_proj.updatedAt !== stampRef.current.tmv3_proj) {
-            stampRef.current.tmv3_proj = all.tmv3_proj.updatedAt;
-            setProjects(JSON.parse(all.tmv3_proj.value).map(migrateProj));
-          }
-          if (all.tmv3_tasks && all.tmv3_tasks.updatedAt && all.tmv3_tasks.updatedAt !== stampRef.current.tmv3_tasks) {
-            stampRef.current.tmv3_tasks = all.tmv3_tasks.updatedAt;
-            setTasks(JSON.parse(all.tmv3_tasks.value).map(migrateTask));
-          }
-        })
-        .catch(function (e) {
-          if (isAuthError(e)) { forceLogout(); return; }
-          setLinkLost(true);
-          if (!hydRef.current) setPhase("offline");
-        });
+      if (document.visibilityState === "hidden") return;
+      load();
     }, SYNC_MS);
-    return function () { clearInterval(iv); };
+    function onVisible() { if (document.visibilityState === "visible") load(); }
+    function onOnline() { load(); }
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("online", onOnline);
+    var tick = setInterval(function () { setTick(Date.now()); }, 30000);
+    return function () {
+      clearInterval(iv); clearInterval(tick);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("online", onOnline);
+    };
   }, [authed]);
 
-  // ── 마감 알림 ─────────────────────────────────────────────
   useEffect(function () {
     if (phase !== "ready") return;
     function check() {
@@ -1093,7 +1089,6 @@ function App() {
     return function () { clearInterval(iv); };
   }, [phase, tasks]);
 
-  // ── 조작 ──────────────────────────────────────────────────
   var PM = useMemo(function () {
     var m = {};
     projects.forEach(function (p) { m[p.id] = p; });
@@ -1111,8 +1106,6 @@ function App() {
           var nd = nextRepeat(t);
           if (nd) {
             var c = {}; for (var k in t) c[k] = t[k];
-            // 기간이 있으면 시작일도 같은 폭만큼 민다.
-            // 안 그러면 회차를 거듭할수록 기간이 늘어나 달력 막대가 계속 길어진다.
             if (t.start && t.start <= t.due) {
               var span = Math.round((parseDay(t.due) - parseDay(t.start)) / 86400000);
               var ns = parseDay(nd);
@@ -1129,10 +1122,9 @@ function App() {
         c2.done = !t.done;
         return c2;
       });
-      saveTasks(next);
+      saveTasks(next, prev);
       return next;
     });
-    // 반복은 눌러도 목록에서 사라지지 않으므로, 무슨 일이 일어났는지 말해 준다
     if (moved === "end") say("반복이 끝났습니다 — 완료로 넘겼습니다");
     else if (moved) say("다음은 " + moved + " (" + DOW[parseDay(moved).getDay()] + ")");
   }
@@ -1142,11 +1134,11 @@ function App() {
     var madeProj = null;
 
     if (form.newProj) {
-      madeProj = { id: uid(), name: form.newProj, category: form.category, deadline: "", note: "" };
+      madeProj = { id: uid(), name: form.newProj, category: form.category, catSet: true, start: "", deadline: "", note: "" };
       pid = madeProj.id;
       setProjects(function (prev) {
         var next = prev.concat([madeProj]);
-        saveProjects(next);
+        saveProjects(next, prev);
         return next;
       });
     }
@@ -1173,7 +1165,7 @@ function App() {
           recurrenceEndDate: form.recurrenceEndDate, created: Date.now()
         }]);
       }
-      saveTasks(next);
+      saveTasks(next, prev);
       return next;
     });
 
@@ -1184,14 +1176,13 @@ function App() {
   function deleteTask(id) {
     setTasks(function (prev) {
       var next = prev.filter(function (t) { return t.id !== id; });
-      saveTasks(next);
+      saveTasks(next, prev);
       return next;
     });
     setSheet(null);
     say("지웠습니다");
   }
 
-  // 프로젝트 만들기·고치기 겸용
   function saveProj(form) {
     setProjects(function (prev) {
       var next;
@@ -1200,15 +1191,16 @@ function App() {
           if (p.id !== form.id) return p;
           var c = {}; for (var k in p) c[k] = p[k];
           c.name = form.name; c.start = form.start; c.deadline = form.deadline; c.note = form.note;
+          c.category = form.category; c.catSet = true;
           return c;
         });
       } else {
         next = prev.concat([{
-          id: uid(), name: form.name, category: form.category || "업무",
+          id: uid(), name: form.name, category: form.category || "업무", catSet: true,
           start: form.start, deadline: form.deadline, note: form.note
         }]);
       }
-      saveProjects(next);
+      saveProjects(next, prev);
       return next;
     });
     setSheet(null);
@@ -1218,7 +1210,7 @@ function App() {
   function deleteProj(id) {
     setProjects(function (prev) {
       var next = prev.filter(function (p) { return p.id !== id; });
-      saveProjects(next);
+      saveProjects(next, prev);
       return next;
     });
     setTasks(function (prev) {
@@ -1228,7 +1220,7 @@ function App() {
         c.pid = "";
         return c;
       });
-      saveTasks(next);
+      saveTasks(next, prev);
       return next;
     });
     setSheet(null);
@@ -1248,17 +1240,30 @@ function App() {
     cloudPost({ action: "gcalSync", tasks: payload })
       .then(function (r) {
         setGcalBusy(false);
-        if (!r.ok) { say("보내지 못했습니다"); return; }
-        say("캘린더로 보냈습니다 · 새로 " + r.created + " · 고침 " + r.updated + " · 정리 " + r.removed);
+        if (r.error === "unauthorized") { forceLogout(); return; }
+        if (r.error === "gcal_busy") { note("이미 보내는 중입니다. 잠시 뒤에 다시 누르세요.", true); return; }
+        if (r.error === "busy") { note("서버가 바쁩니다. 잠시 뒤에 다시 누르세요.", true); return; }
+        if (r.created === undefined) { note("보내지 못했습니다. " + (r.error || ""), true); return; }
+
+        var parts = ["새로 " + r.created, "고침 " + r.updated, "정리 " + r.removed];
+        if (r.unchanged) parts.push("그대로 " + r.unchanged);
+        var msg = "캘린더로 보냈습니다. " + parts.join(" · ");
+        if (r.left) msg += ". 남은 " + r.left + "건은 한 번 더 누르면 보냅니다";
+        if (r.failed) msg += ". " + r.failed + "건 실패: " + r.error;
+        note(msg, !!r.failed);
       })
       .catch(function (e) {
         setGcalBusy(false);
         if (isAuthError(e)) { forceLogout(); return; }
-        say("보내지 못했습니다");
+        note("보내지 못했습니다. 연결을 확인하세요. (" + (e && e.message || "") + ")", true);
       });
+
+    function note(text, bad) {
+      setGcalNote({ text: text, bad: bad });
+      say(bad ? "캘린더로 보내지 못한 것이 있습니다" : "캘린더로 보냈습니다");
+    }
   }
 
-  // ── 보이는 목록 ───────────────────────────────────────────
   var visible = useMemo(function () {
     var out = tasks.filter(function (t) {
       if (filter === "진행중") return !t.done;
@@ -1270,7 +1275,7 @@ function App() {
       return true;
     });
     return out.sort(function (a, b) {
-      if (a.done !== b.done) return a.done ? 1 : -1;            // 완료는 아래로
+      if (a.done !== b.done) return a.done ? 1 : -1;
       if (a.status !== b.status) return a.status === "우선" ? -1 : 1;
       var ad = a.due || "9999-12-31", bd = b.due || "9999-12-31";
       if (ad !== bd) return ad < bd ? -1 : 1;
@@ -1291,7 +1296,6 @@ function App() {
   if (!authed) return html`<${Login} onIn=${function () { setAuthed(true); }} />`;
 
   var now = new Date();
-  // 지금 보고 있는 것을 명령 한 줄로 되비춘다. 달력일 때는 필터가 아니라 그 달을 말한다.
   var cmdText = view === "config" ? "config"
               : view === "calendar" ? "calendar"
               : filter === "진행중" ? "tasks --active"
@@ -1301,7 +1305,7 @@ function App() {
   return html`
     <div id="app">
       <div class="top">
-        <span class="brand">taskboard</span>
+        <span class="brand">taskboard${phase === "ready" && lastSync ? html`<span class="sync">${agoLabel(lastSync)}</span>` : null}</span>
         <span class="today mono">${fmtD(now)} ${DOW[now.getDay()]}</span>
       </div>
 
@@ -1362,7 +1366,7 @@ function App() {
 
         ${phase === "ready" && view === "config" ? html`
           <${ConfigView} projects=${projects} tasks=${tasks}
-                         gcalBusy=${gcalBusy} onGcal=${sendGcal}
+                         gcalBusy=${gcalBusy} onGcal=${sendGcal} gcalNote=${gcalNote}
                          notifyState=${notifyState}
                          onNewProj=${function () { setSheet({ proj: null, newProj: true }); }}
                          onEditProj=${function (p) { setSheet({ proj: p }); }}
@@ -1405,15 +1409,13 @@ function App() {
 
 render(html`<${App} />`, document.getElementById("root"));
 
-// 알림 권한은 설정에서 「켜기」를 눌렀을 때만 물어본다.
-// 사용자 조작 없이 requestPermission을 부르면 브라우저가 무시하거나 경고를 남긴다.
-
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", function () {
     navigator.serviceWorker.register("sw.js").catch(function () {});
   });
 }
 })();
+
 </script>
 </body>
 </html>
